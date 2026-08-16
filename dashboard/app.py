@@ -733,8 +733,11 @@ elif page == "ML Predictions":
 
     # ── Load predictor ─────────────────────────────────────────────────────
     try:
-        from core.ml.predictor import get_predictor
-        predictor = get_predictor(symbol)
+        @st.cache_resource
+        def _load_predictor(sym):
+            from core.ml.predictor import MLPredictor
+            return MLPredictor(sym)
+        predictor = _load_predictor(symbol)
         models_ready = predictor.is_ready()
     except Exception as e:
         st.error(f"ML module error: {e}")
@@ -861,7 +864,10 @@ elif page == "AI Agent":
         technicals = {}
         if not hist_d.empty:
             last = hist_d.iloc[-1]
-            technicals = {k: float(last.get(k, 0)) for k in ["ema21", "ema50", "rsi", "macd", "atr"]}
+            for k in ["ema21", "ema50", "rsi", "macd", "atr"]:
+                v = last.get(k)
+                if v is not None and str(v) != "nan":
+                    technicals[k] = float(v)
 
         market_ctx = {
             "ltp":      quote.get("ltp", 0),

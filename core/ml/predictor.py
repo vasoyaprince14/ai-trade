@@ -74,17 +74,21 @@ class MLPredictor:
     # ── Model loading ─────────────────────────────────────────────────────────
 
     def _load_models(self):
-        ok = all([
-            self._binary.load(),
-            self._fiveclass.load(),
-            self._regress.load(),
-        ])
-        if ok:
+        results = {}
+        for name, model in [("binary", self._binary), ("5class", self._fiveclass), ("regression", self._regress)]:
+            try:
+                results[name] = model.load()
+            except Exception as e:
+                logger.warning(f"Failed to load {name} model: {e}")
+                results[name] = False
+
+        if results.get("binary"):
             self._loaded   = True
             self._model_ts = datetime.now()
-            logger.info(f"ML models loaded for {self.symbol}")
+            loaded = [k for k, v in results.items() if v]
+            logger.info(f"ML models loaded for {self.symbol}: {loaded}")
         else:
-            logger.warning(f"ML models not found for {self.symbol}. Run trainer first.")
+            logger.warning(f"Binary model not found for {self.symbol}. Run: python scripts/train_models.py")
 
     def _maybe_reload(self):
         """Reload models if stale."""

@@ -74,7 +74,6 @@ class NiftyMLModel:
                     n_jobs=-1,
                     verbosity=0,
                 )
-            objective = "binary:logistic" if n_classes == 2 else "multi:softprob"
             params = dict(
                 n_estimators=500,
                 learning_rate=0.05,
@@ -83,7 +82,6 @@ class NiftyMLModel:
                 colsample_bytree=0.8,
                 reg_alpha=0.1,
                 reg_lambda=1.0,
-                use_label_encoder=False,
                 eval_metric="logloss" if n_classes == 2 else "mlogloss",
                 random_state=42,
                 n_jobs=-1,
@@ -91,7 +89,7 @@ class NiftyMLModel:
             )
             if n_classes > 2:
                 params["num_class"] = n_classes
-                params["objective"] = objective
+                params["objective"] = "multi:softprob"
             return xgb.XGBClassifier(**params)
         except ImportError:
             logger.warning("xgboost not installed")
@@ -168,6 +166,12 @@ class NiftyMLModel:
         X = data[feature_cols].values
         y = data[self._label_col].values
 
+        # XGBoost requires classes starting at 0 — shift 5-class labels [-2..2] → [0..4]
+        self._label_offset = 0
+        if self.model_type == "5class":
+            self._label_offset = int(-y.min()) if y.min() < 0 else 0
+            y = y + self._label_offset
+
         # Walk-forward split (no future leak)
         split = int(len(X) * (1 - val_frac))
         X_train, X_val = X[:split], X[split:]
@@ -187,15 +191,17 @@ class NiftyMLModel:
             model.fit(X_train, y_train)
             if self.model_type == "regression":
                 from sklearn.metrics import mean_absolute_error, r2_score
-                pred_val = model.predict(X_val)
-                metrics[f"{name}_val_mae"] = round(float(mean_absolute_error(y_val, pred_val)), 6)
-                metrics[f"{name}_val_r2"]  = round(float(r2_score(y_val, pred_val)), 4)
+                if len(X_val):
+                    pred_val = model.predict(X_val)
+                    metrics[f"{name}_val_mae"] = round(float(mean_absolute_error(y_val, pred_val)), 6)
+                    metrics[f"{name}_val_r2"]  = round(float(r2_score(y_val, pred_val)), 4)
             else:
                 from sklearn.metrics import accuracy_score
                 pred_train = model.predict(X_train)
-                pred_val   = model.predict(X_val)
                 metrics[f"{name}_train_acc"] = round(float(accuracy_score(y_train, pred_train)), 4)
-                metrics[f"{name}_val_acc"]   = round(float(accuracy_score(y_val, pred_val)), 4)
+                if len(X_val):
+                    pred_val = model.predict(X_val)
+                    metrics[f"{name}_val_acc"] = round(float(accuracy_score(y_val, pred_val)), 4)
 
         self.is_trained = True
 
@@ -259,11 +265,12 @@ class NiftyMLModel:
         elif self.model_type == "5class":
             labels = ["Strong Down", "Weak Down", "Neutral", "Weak Up", "Strong Up"]
             cls = int(np.argmax(proba))
+            offset = getattr(self, "_label_offset", 2)
             return {
-                "prediction":  cls - 2,   # -2 to +2
-                "label":       labels[cls],
+                "prediction":  cls - offset,   # back to -2..+2
+                "label":       labels[min(cls, 4)],
                 "confidence":  float(np.max(proba)),
-                "probabilities": {labels[i]: round(float(proba[i]), 4) for i in range(5)},
+                "probabilities": {labels[i]: round(float(proba[i]), 4) for i in range(min(5, len(proba)))},
             }
         else:  # regression
             val = float(proba[0])
