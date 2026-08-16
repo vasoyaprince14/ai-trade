@@ -147,7 +147,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["Overview", "Order Flow", "Strategies & Signals", "Positions & P&L", "Backtest", "Option Chain"],
+        ["Overview", "Order Flow", "ML Predictions", "AI Agent", "Strategies & Signals", "Positions & P&L", "Backtest", "Option Chain"],
     )
 
 
@@ -722,3 +722,232 @@ elif page == "Option Chain":
 
     else:
         st.warning("Option chain data not available. NSE may be closed or unreachable.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Page: ML Predictions
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "ML Predictions":
+    st.title(f"ML Predictions | {symbol}")
+    st.caption("XGBoost + LightGBM ensemble predictions. Train models first: `python -m core.ml.trainer`")
+
+    # ── Load predictor ─────────────────────────────────────────────────────
+    try:
+        from core.ml.predictor import get_predictor
+        predictor = get_predictor(symbol)
+        models_ready = predictor.is_ready()
+    except Exception as e:
+        st.error(f"ML module error: {e}")
+        models_ready = False
+
+    if not models_ready:
+        st.warning("Models not trained yet. Run the trainer to generate predictions:")
+        st.code("python -c \"from core.ml.trainer import WalkForwardTrainer; WalkForwardTrainer('NIFTY').train_from_historical(365)\"")
+        st.stop()
+
+    # ── Generate prediction ────────────────────────────────────────────────
+    with st.spinner("Generating ML prediction..."):
+        try:
+            ohlcv = get_historical_data(symbol, "5min", 30)
+            vix_val   = get_vix()
+            pcr_data  = get_pcr(symbol)
+            pcr_val   = pcr_data.get("pcr_oi", 1.0)
+            max_p     = get_max_pain(symbol)
+
+            result = predictor.predict(
+                ohlcv=ohlcv,
+                vix=vix_val,
+                pcr=pcr_val,
+                max_pain=max_p,
+            )
+        except Exception as e:
+            st.error(f"Prediction error: {e}")
+            result = None
+
+    if result is None:
+        st.error("Could not generate prediction. Insufficient data.")
+    else:
+        # ── Signal banner ──────────────────────────────────────────────────
+        dir_color = {"BUY": "#00e676", "SELL": "#ff5252", "NEUTRAL": "#ffd740"}.get(result.direction, "#ffd740")
+        st.markdown(
+            f"<div style='background:#1a1d2e;border-left:6px solid {dir_color};"
+            f"padding:20px;border-radius:8px;margin-bottom:16px'>"
+            f"<h2 style='color:{dir_color};margin:0'>{result.direction}</h2>"
+            f"<p style='color:#aaa;margin:4px 0'>{result.label_5class} &nbsp;|&nbsp; "
+            f"Confidence: {result.confidence:.1%} &nbsp;|&nbsp; "
+            f"Signal Strength: {'★' * result.signal_strength}{'☆' * (5 - result.signal_strength)}</p>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Metric row ─────────────────────────────────────────────────────
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Direction",        result.direction)
+        c2.metric("P(Up)",            f"{result.prob_up:.1%}")
+        c3.metric("P(Down)",          f"{result.prob_down:.1%}")
+        c4.metric("Predicted Return", f"{result.predicted_return:+.3f}%")
+        c5.metric("Model Age",        f"{result.model_age_days:.1f}d")
+
+        # ── Probability gauge chart ────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Probability Breakdown")
+
+        fig = go.Figure(go.Bar(
+            x=["P(Down)", "P(Neutral)", "P(Up)"],
+            y=[result.prob_down,
+               max(0, 1 - result.prob_up - result.prob_down),
+               result.prob_up],
+            marker_color=["#ff5252", "#ffd740", "#00e676"],
+            text=[f"{result.prob_down:.1%}",
+                  f"{max(0, 1 - result.prob_up - result.prob_down):.1%}",
+                  f"{result.prob_up:.1%}"],
+            textposition="outside",
+        ))
+        fig.update_layout(
+            height=280, paper_bgcolor="#0e1117", plot_bgcolor="#1a1d2e",
+            font=dict(color="#e0e0e0"), showlegend=False,
+            yaxis=dict(range=[0, 1]),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Feature importance ─────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Top Feature Importances")
+        try:
+            fi_df = predictor._binary.get_feature_importance_df().head(20)
+            if not fi_df.empty:
+                fig2 = go.Figure(go.Bar(
+                    x=fi_df["importance"][::-1],
+                    y=fi_df["feature"][::-1],
+                    orientation="h",
+                    marker_color="#40c4ff",
+                ))
+                fig2.update_layout(
+                    height=420, paper_bgcolor="#0e1117", plot_bgcolor="#1a1d2e",
+                    font=dict(color="#e0e0e0"), margin=dict(l=160),
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+        except Exception:
+            st.info("Feature importance not available.")
+
+        # ── Notes ──────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.caption(f"Model details: {result.features_used} features used | {result.notes}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Page: AI Agent
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "AI Agent":
+    st.title("AI Trading Copilot")
+    st.caption("Powered by Claude claude-sonnet-4-6. Asks questions about signals, risk, and market state.")
+
+    # ── Initialize agent ───────────────────────────────────────────────────
+    try:
+        from core.ai.agent import get_agent
+        agent = get_agent()
+    except Exception as e:
+        st.error(f"Agent init error: {e}")
+        st.stop()
+
+    # ── Build market context ───────────────────────────────────────────────
+    with st.spinner("Loading market data..."):
+        quote   = get_quote(symbol)
+        vix_v   = get_vix()
+        pcr_d   = get_pcr(symbol)
+        max_p   = get_max_pain(symbol)
+        hist_d  = get_historical_data(symbol, "1d", 30)
+
+        technicals = {}
+        if not hist_d.empty:
+            last = hist_d.iloc[-1]
+            technicals = {k: float(last.get(k, 0)) for k in ["ema21", "ema50", "rsi", "macd", "atr"]}
+
+        market_ctx = {
+            "ltp":      quote.get("ltp", 0),
+            "change":   quote.get("change_pct", 0),
+            "vix":      vix_v,
+            "pcr":      pcr_d.get("pcr_oi", 1.0),
+            "max_pain": max_p,
+        }
+
+        # Try get news sentiment
+        sentiment_ctx = {}
+        try:
+            from core.news.collector import get_news_collector
+            nc = get_news_collector()
+            sentiment_ctx = nc.get_market_sentiment()
+        except Exception:
+            pass
+
+        # Try get ML prediction
+        pred_ctx = {}
+        try:
+            from core.ml.predictor import get_predictor
+            pr = get_predictor(symbol)
+            if pr.is_ready():
+                ohlcv = get_historical_data(symbol, "5min", 30)
+                res = pr.predict(ohlcv, vix=vix_v, pcr=market_ctx["pcr"], max_pain=max_p)
+                if res:
+                    pred_ctx = {
+                        "direction":       res.direction,
+                        "confidence":      res.confidence,
+                        "predicted_return": res.predicted_return,
+                        "label_5class":    res.label_5class,
+                    }
+        except Exception:
+            pass
+
+    context = {
+        "market":     market_ctx,
+        "technicals": technicals,
+    }
+    if sentiment_ctx:
+        context["sentiment"] = {"sentiment": sentiment_ctx.get("sentiment"), "score": sentiment_ctx.get("score"), "count": sentiment_ctx.get("count")}
+    if pred_ctx:
+        context["prediction"] = pred_ctx
+
+    # ── Quick action buttons ───────────────────────────────────────────────
+    st.subheader("Quick Analysis")
+    qcol1, qcol2, qcol3 = st.columns(3)
+
+    if qcol1.button("Explain Current Signal"):
+        with st.spinner("Thinking..."):
+            reply = agent.explain_signal(context)
+        st.session_state.setdefault("chat", []).append({"role": "assistant", "content": reply})
+
+    if qcol2.button("Daily Market Summary"):
+        with st.spinner("Thinking..."):
+            reply = agent.daily_summary(context)
+        st.session_state.setdefault("chat", []).append({"role": "assistant", "content": reply})
+
+    if qcol3.button("Clear Chat"):
+        st.session_state["chat"] = []
+        agent.clear_history()
+        st.rerun()
+
+    st.markdown("---")
+
+    # ── Chat interface ─────────────────────────────────────────────────────
+    if "chat" not in st.session_state:
+        st.session_state["chat"] = []
+
+    for msg in st.session_state["chat"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask about signals, risk, market analysis..."):
+        st.session_state["chat"].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing..."):
+                reply = agent.query(prompt, context)
+            st.markdown(reply)
+            st.session_state["chat"].append({"role": "assistant", "content": reply})
+
+    # ── Context summary ────────────────────────────────────────────────────
+    with st.expander("Market Context (sent to AI)"):
+        import json as _json
+        st.json(context)
