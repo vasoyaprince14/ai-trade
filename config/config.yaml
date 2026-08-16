@@ -1,0 +1,165 @@
+# ============================================
+# AI-TRADE Configuration
+# ============================================
+
+app:
+  name: "AI-Trade"
+  version: "1.0.0"
+  mode: "paper"              # paper | live
+  log_level: "INFO"
+  timezone: "Asia/Kolkata"
+
+# ---- Market Settings -------------------------
+market:
+  exchange: "NSE"
+  indices:
+    - NIFTY
+    - BANKNIFTY
+    - FINNIFTY
+  trading_hours:
+    start: "09:15"
+    end: "15:30"
+  lot_sizes:
+    NIFTY: 25
+    BANKNIFTY: 15
+    FINNIFTY: 40
+
+# ---- Data Settings ---------------------------
+data:
+  # NSE scraper refresh interval (seconds)
+  option_chain_refresh: 60
+  oi_snapshot_interval: 300       # 5 min
+  historical_days: 365            # days of historical data to fetch
+
+  # Database
+  db_path: "data/db/trading.db"
+
+  # Cache
+  cache_dir: "data/cache"
+
+# ---- Order Flow Settings ---------------------
+order_flow:
+  oi_change_threshold: 0.05       # 5% OI change triggers signal
+  pcr_bull_threshold: 0.7         # PCR below this = bullish
+  pcr_bear_threshold: 1.3         # PCR above this = bearish
+  strikes_range: 10               # Number of strikes each side of ATM
+  smart_money_oi_threshold: 100000  # OI above this = institutional activity
+
+# ---- Strategy Settings -----------------------
+strategies:
+
+  # Intraday - Scalp Momentum (5-min / 15-min)
+  scalp_momentum:
+    enabled: true
+    timeframe: "5min"
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    atr_multiplier: 1.5
+    max_trades_per_day: 5
+    target_pct: 0.6               # % target on premium
+    sl_pct: 0.3                   # % SL on premium
+
+  # Intraday - Opening Range Breakout (ORB)
+  orb:
+    enabled: true
+    range_minutes: 15             # 15-min opening range
+    target_r: 2.0                 # 2R target
+    sl_r: 1.0                     # 1R stop loss
+    max_trades_per_day: 2
+
+  # Swing - EMA Trend Following (Daily)
+  swing_trend:
+    enabled: true
+    timeframe: "1d"
+    ema_fast: 21
+    ema_slow: 55
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    hold_days_min: 3
+    hold_days_max: 20
+    sl_atr_multiplier: 2.0
+    target_atr_multiplier: 4.0
+
+  # Positional - Long Term (Weekly)
+  long_term:
+    enabled: true
+    timeframe: "1wk"
+    ema: 200
+    adx_threshold: 25
+    hold_weeks_min: 4
+    hold_weeks_max: 52
+
+  # F&O - Order Flow Based
+  order_flow_fno:
+    enabled: true
+    strategy_type: "straddle"     # straddle | iron_fly | strangle
+    sell_iv_rank_min: 50          # Sell when IV Rank > 50%
+    delta_neutral: true
+    hedge_pct: 0.2                # % of premium for hedge
+    exit_profit_pct: 40           # Exit at 40% profit
+    exit_loss_pct: 100            # SL at 100% of premium received
+    days_to_expiry_entry: 14      # Enter 14 DTE
+    days_to_expiry_exit: 3        # Exit at 3 DTE
+
+  # F&O - Short Straddle
+  straddle:
+    enabled: false
+    exit_profit_pct: 30
+    exit_loss_pct: 80
+
+  # F&O - Iron Fly
+  iron_fly:
+    enabled: false
+    wing_width: 200               # Wing width in points
+    exit_profit_pct: 40
+    exit_loss_pct: 100
+
+# ---- Risk Management -------------------------
+risk:
+  max_capital_per_trade_pct: 5   # Max 5% capital per trade
+  max_open_trades: 5
+  max_daily_loss_pct: 2          # Stop trading if daily loss > 2%
+  max_weekly_loss_pct: 5
+  max_drawdown_pct: 15
+  position_sizing: "fixed_risk"   # fixed_risk | kelly | fixed_qty
+  default_capital: 500000         # INR
+
+# ---- Broker Settings -------------------------
+brokers:
+  default: "paper"               # paper | zerodha | angel
+
+  zerodha:
+    api_key: ""                   # Set in .env
+    api_secret: ""
+    access_token: ""
+    totp_secret: ""               # For auto-login
+
+  angel:
+    api_key: ""
+    client_id: ""
+    password: ""
+    totp_secret: ""
+
+  paper:
+    initial_capital: 500000
+    slippage_pct: 0.05            # 0.05% slippage simulation
+    brokerage_per_order: 20       # INR per order
+
+# ---- Notifications ---------------------------
+notifications:
+  enabled: true
+  desktop: true
+  telegram:
+    enabled: false
+    bot_token: ""                 # Set in .env
+    chat_id: ""
+
+# ---- Dashboard Settings ----------------------
+dashboard:
+  port: 8501
+  auto_refresh_seconds: 30
+  dark_mode: true

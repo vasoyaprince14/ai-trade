@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+data/db/
+logs/
+*.egg-info/
+.DS_Store
+vendors/qlib/
+vendors/nautilus/
+vendors/openbb/
