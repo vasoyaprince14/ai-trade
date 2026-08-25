@@ -133,7 +133,7 @@ if error:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
-tabs = st.tabs(["📊 Live Signal", "📈 Chart", "🛡️ 0-Loss Hedge", "🇮🇳 India + News", "📋 History"])
+tabs = st.tabs(["📊 Live Signal", "📈 Chart", "🛡️ Hedge System", "🇮🇳 India + News", "🤖 Bull vs Bear", "📋 History"])
 
 
 # ══ TAB 1: LIVE SIGNAL ═══════════════════════════════════════════════════════
@@ -545,8 +545,73 @@ with tabs[3]:
                 st.error(f"Stock scan error: {e}")
 
 
-# ══ TAB 5: HISTORY ═══════════════════════════════════════════════════════════
+# ══ TAB 5: BULL VS BEAR DEBATE ═══════════════════════════════════════════════
 with tabs[4]:
+
+    st.markdown("## 🤖 Bull vs Bear Debate Engine")
+    st.markdown("""
+    Two AI agents (Bull + Bear) debate the current XAUUSD setup using live market data.
+    A judge agent produces the final verdict.
+    *(Powered by Ollama llama3.2:3b — takes ~30s)*
+    """)
+
+    debate_ctx = {
+        "symbol":    "XAUUSD",
+        "price":     f"${sig.entry:.2f}" if sig else "N/A",
+        "trend_1h":  sig.trend_1h if sig else "UNKNOWN",
+        "rsi_14":    f"{sig.rsi:.1f}" if sig else "N/A",
+        "atr_14":    f"{sig.atr:.2f}" if sig else "N/A",
+        "session":   sig.session if sig else "N/A",
+        "ml_score":  f"{sig.score}/10  ({sig.action})" if sig else "N/A",
+        "dxy":       f"{macro.get('dxy', 0):.2f}",
+        "us_10y":    f"{macro.get('us10y', 0):.2f}%",
+        "vix":       f"{macro.get('vix', 0):.1f}",
+        "signal_reason": sig.reason[:200] if sig else "",
+    }
+
+    if st.button("⚡ Run Bull vs Bear Debate", key="debate_btn"):
+        with st.spinner("Bull and Bear agents are debating... (~30s)"):
+            try:
+                from core.agents.debate import run_debate
+                result = run_debate(debate_ctx, symbol="XAUUSD", rounds=2)
+                st.session_state["debate_result"] = result
+            except Exception as e:
+                st.error(f"Debate error: {e}")
+
+    if "debate_result" in st.session_state:
+        dr = st.session_state["debate_result"]
+        verdict = dr.get("verdict", {})
+        direction = verdict.get("direction", "NEUTRAL")
+        confidence = verdict.get("confidence", 50)
+        vcolor = {"BULLISH": "#00d4aa", "BEARISH": "#ff4b4b"}.get(direction, "#ffa500")
+
+        st.markdown(f"### Verdict: <span style='color:{vcolor}'>{direction}</span> ({confidence}%)",
+                    unsafe_allow_html=True)
+        st.info(f"**Reason:** {verdict.get('reason', '')}")
+        st.caption(f"**Invalidated if:** {verdict.get('invalidated_if', 'N/A')} | Agreed with: **{verdict.get('agreed_with', 'N/A')}**")
+
+        col_b, col_s = st.columns(2)
+        with col_b:
+            st.markdown("#### 🟢 Bull Case")
+            st.write(dr.get("bull_case", ""))
+            if dr.get("bull_rebuttal"):
+                st.markdown("**Rebuttal:**")
+                st.write(dr.get("bull_rebuttal", ""))
+
+        with col_s:
+            st.markdown("#### 🔴 Bear Case")
+            st.write(dr.get("bear_case", ""))
+            if dr.get("bear_rebuttal"):
+                st.markdown("**Rebuttal:**")
+                st.write(dr.get("bear_rebuttal", ""))
+
+        st.markdown("#### 🔍 Evidence Check")
+        st.write(dr.get("evidence", ""))
+        st.caption(f"Debated at: {dr.get('timestamp', '')}")
+
+
+# ══ TAB 6: HISTORY ═══════════════════════════════════════════════════════════
+with tabs[5]:
 
     st.markdown("## 📋 Signal History")
 
