@@ -64,9 +64,9 @@ def _keep_services():
     _ensure_running(
         "dashboard",
         [sys.executable, "-m", "streamlit", "run", "dashboard/app.py",
-         "--server.port", "8501", "--server.headless", "true"],
+         "--server.port", "8502", "--server.headless", "true"],
         "/tmp/dashboard.log",
-        check_port=8501,
+        check_port=8502,
     )
     _ensure_running(
         "ngrok",

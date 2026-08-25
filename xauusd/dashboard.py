@@ -133,7 +133,11 @@ if error:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
-tabs = st.tabs(["📊 Live Signal", "📈 Chart", "🛡️ Hedge System", "🇮🇳 India + News", "🤖 Bull vs Bear", "📋 History"])
+tabs = st.tabs([
+    "📊 Live Signal", "📈 Chart", "🛡️ Hedge System",
+    "⚡ GEX + IV Surface", "🌐 Regime + Breadth + Sector",
+    "🇮🇳 India + News", "🤖 Bull vs Bear", "📋 History"
+])
 
 
 # ══ TAB 1: LIVE SIGNAL ═══════════════════════════════════════════════════════
@@ -459,8 +463,360 @@ with tabs[2]:
         st.info("A live BUY or SELL signal is needed to compute trail levels.")
 
 
-# ══ TAB 4: INDIA + NEWS ══════════════════════════════════════════════════════
+# ══ TAB 4: GEX + IV SURFACE ══════════════════════════════════════════════════
 with tabs[3]:
+
+    st.markdown("## ⚡ GEX — Gamma Exposure  +  📊 IV Surface")
+    st.caption("Nifty F&O data from NSE | Refreshed every 60s")
+
+    @st.cache_data(ttl=60)
+    def fetch_nifty_chain():
+        from core.order_flow.oi_tracker import OITracker
+        t = OITracker("NIFTY")
+        t.tick_tape()
+        s = t.get_market_summary()
+        return s.get("df"), s.get("spot", 24000), s.get("expiry", "")
+
+    with st.spinner("Fetching Nifty option chain..."):
+        try:
+            chain_df, nifty_spot, nifty_expiry = fetch_nifty_chain()
+            chain_ok = chain_df is not None and not chain_df.empty
+        except Exception as e:
+            st.error(f"Chain fetch error: {e}")
+            chain_ok = False
+            chain_df, nifty_spot, nifty_expiry = None, 24000, ""
+
+    # ── GEX ──────────────────────────────────────────────────────────────────
+    st.markdown("### ⚡ Gamma Exposure (GEX)")
+
+    if chain_ok:
+        try:
+            from core.options.gex import compute_gex
+            from datetime import datetime as dt
+            try:
+                exp_date    = dt.strptime(nifty_expiry, "%d-%m-%Y").date()
+                expiry_days = max(1, (exp_date - dt.now().date()).days)
+            except Exception:
+                expiry_days = 1
+
+            gex = compute_gex(chain_df, nifty_spot, expiry_days)
+            gex_df = gex.get("by_strike")
+
+            # GEX summary metrics
+            g1, g2, g3, g4, g5 = st.columns(5)
+            g1.metric("Spot", f"₹{nifty_spot:,.0f}")
+            g2.metric("Net GEX", f"{gex['net_total_gex']:+.2f}B")
+            g3.metric("Gamma Flip", f"₹{gex['gamma_flip']:.0f}")
+            g4.metric("Dealer Bias", gex["dealer_bias"])
+            g5.metric("Expected Vol", gex["expected_volatility"])
+
+            # GEX bar chart
+            if gex_df is not None and not gex_df.empty:
+                fig_gex = go.Figure()
+                colors = ["#00d4aa" if v >= 0 else "#ff4b4b" for v in gex_df["net_gex"]]
+                fig_gex.add_trace(go.Bar(
+                    x=gex_df["strike"], y=gex_df["net_gex"],
+                    marker_color=colors, name="Net GEX",
+                ))
+                fig_gex.add_vline(x=nifty_spot, line_dash="dash", line_color="white",
+                                  annotation_text=f"Spot {nifty_spot:.0f}")
+                fig_gex.add_hline(y=0, line_color="#888", line_width=1)
+                if gex["gamma_flip"]:
+                    fig_gex.add_vline(x=gex["gamma_flip"], line_dash="dot", line_color="#ffa500",
+                                      annotation_text=f"Flip {gex['gamma_flip']:.0f}")
+                fig_gex.update_layout(
+                    title="Net GEX by Strike (₹ Billions)",
+                    height=350, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    font_color="white", xaxis_title="Strike", yaxis_title="Net GEX (B)",
+                    margin=dict(t=40, b=20),
+                )
+                st.plotly_chart(fig_gex, use_container_width=True)
+
+                # Interpretation
+                bias = gex["dealer_bias"]
+                if bias == "LONG_GAMMA":
+                    st.success("🔒 Dealers LONG gamma → Market likely to **mean-revert** and pin near gamma flip. Sell options / straddle favorable.")
+                elif bias == "SHORT_GAMMA":
+                    st.error("⚡ Dealers SHORT gamma → Market can **accelerate** in either direction. Directional trades preferred.")
+                else:
+                    st.info("⚖️ Gamma NEUTRAL — No strong dealer bias.")
+        except Exception as e:
+            st.error(f"GEX error: {e}")
+    else:
+        st.warning("Option chain data not available")
+
+    st.markdown("---")
+
+    # ── IV Surface ────────────────────────────────────────────────────────────
+    st.markdown("### 📊 IV Surface — Smile, Skew, Rank")
+
+    if chain_ok:
+        try:
+            from core.options.iv_surface import get_iv_surface
+            ivs_obj = get_iv_surface()
+            ivs = ivs_obj.full_summary(chain_df, nifty_spot)
+
+            smile_df = ivs.get("smile")
+            atm      = ivs.get("atm", {})
+            iv_rank  = ivs.get("iv_rank", {})
+
+            # IV Rank metrics
+            r1, r2, r3, r4, r5 = st.columns(5)
+            r1.metric("India VIX", f"{iv_rank.get('vix_current', 0):.2f}")
+            r2.metric("IV Rank",   f"{iv_rank.get('iv_rank', 0):.0f}/100")
+            r3.metric("IV %ile",   f"{iv_rank.get('iv_percentile', 0):.0f}%")
+            r4.metric("ATM IV",    f"{atm.get('atm_iv', 0):.1f}%")
+            r5.metric("IV Regime", iv_rank.get("regime", "N/A"))
+
+            st.info(f"**Strategy:** {ivs.get('strategy_hint', '')}")
+
+            if smile_df is not None and not smile_df.empty:
+                col_smile, col_skew = st.columns(2)
+
+                with col_smile:
+                    # IV Smile chart
+                    fig_smile = go.Figure()
+                    pe_iv_clean = smile_df["pe_iv"].dropna()
+                    ce_iv_clean = smile_df["ce_iv"].dropna()
+                    fig_smile.add_trace(go.Scatter(
+                        x=smile_df["strike"], y=smile_df["pe_iv"],
+                        name="PE IV", line=dict(color="#ff4b4b", width=2),
+                        mode="lines+markers",
+                    ))
+                    fig_smile.add_trace(go.Scatter(
+                        x=smile_df["strike"], y=smile_df["ce_iv"],
+                        name="CE IV", line=dict(color="#00d4aa", width=2),
+                        mode="lines+markers",
+                    ))
+                    fig_smile.add_vline(x=nifty_spot, line_dash="dash", line_color="white",
+                                        annotation_text="Spot")
+                    fig_smile.update_layout(
+                        title="IV Smile", height=320,
+                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font_color="white",
+                        xaxis_title="Strike", yaxis_title="IV %", margin=dict(t=40, b=20),
+                    )
+                    st.plotly_chart(fig_smile, use_container_width=True)
+
+                with col_skew:
+                    # Skew chart (PE - CE)
+                    fig_skew = go.Figure()
+                    skew_colors = ["#ff4b4b" if v > 0 else "#00d4aa" for v in smile_df["skew"].fillna(0)]
+                    fig_skew.add_trace(go.Bar(
+                        x=smile_df["strike"], y=smile_df["skew"],
+                        marker_color=skew_colors, name="PE-CE Skew",
+                    ))
+                    fig_skew.add_hline(y=0, line_color="#888", line_width=1)
+                    fig_skew.update_layout(
+                        title="PE vs CE Skew (PE-CE IV)", height=320,
+                        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font_color="white",
+                        xaxis_title="Strike", yaxis_title="Skew (IV%)", margin=dict(t=40, b=20),
+                    )
+                    st.plotly_chart(fig_skew, use_container_width=True)
+
+            # Historical vol term structure
+            st.markdown("#### HV Term Structure (India VIX history)")
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("HV 7D",  f"{iv_rank.get('hv_7d', 0):.1f}%")
+            t2.metric("HV 14D", f"{iv_rank.get('hv_14d', 0):.1f}%")
+            t3.metric("HV 30D", f"{iv_rank.get('hv_30d', 0):.1f}%")
+            t4.metric("HV 90D", f"{iv_rank.get('hv_90d', 0):.1f}%")
+            st.caption(f"Term slope: {iv_rank.get('term_slope', 'N/A')}  |  "
+                       f"Smile shape: {atm.get('smile_shape', 'N/A')}  |  "
+                       f"Risk Reversal: {atm.get('risk_reversal', 0):+.2f}")
+
+        except Exception as e:
+            st.error(f"IV surface error: {e}")
+
+
+# ══ TAB 5: REGIME + BREADTH + SECTOR ═════════════════════════════════════════
+with tabs[4]:
+
+    st.markdown("## 🌐 Market Intelligence — Regime · Breadth · Sectors · Calendar")
+
+    # ── Regime ────────────────────────────────────────────────────────────────
+    st.markdown("### 🎯 Market Regime")
+
+    @st.cache_data(ttl=120)
+    def fetch_regime():
+        from core.order_flow.oi_tracker import OITracker
+        from core.agents.regime import detect_regime
+        t = OITracker("NIFTY")
+        t.tick_tape()
+        f = t.get_model_features()
+        return detect_regime(f, iv_rank=50, vix=f.get("f_vix", 15))
+
+    try:
+        regime = fetch_regime()
+        r_color = {
+            "TRENDING_UP": "#00d4aa", "TRENDING_DOWN": "#ff4b4b",
+            "HIGH_VOLATILITY": "#ff8c00", "LOW_VOLATILITY": "#4fa3e0",
+            "RANGING": "#ffa500", "EVENT_DRIVEN": "#a78bfa",
+        }.get(regime["regime"], "#888")
+
+        rc1, rc2 = st.columns([1, 2])
+        with rc1:
+            st.markdown(f"<h2 style='color:{r_color}'>{regime['regime']}</h2>", unsafe_allow_html=True)
+            st.metric("Confidence", f"{regime['confidence']:.0f}%")
+            st.markdown(f"**Strategy:** `{regime['strategy']}`")
+            st.caption(regime["description"])
+        with rc2:
+            inds = regime.get("indicators", {})
+            i1, i2, i3 = st.columns(3)
+            i1.metric("Tape Bias",  f"{inds.get('tape_bias', 0):+.2f}")
+            i2.metric("FII Bias",   f"{inds.get('fii_bias', 0):+.2f}")
+            i3.metric("PCR",        f"{inds.get('pcr', 1):.2f}")
+            i4, i5, i6 = st.columns(3)
+            i4.metric("IV Rank",    f"{inds.get('iv_rank', 50):.0f}")
+            i5.metric("VIX",        f"{inds.get('vix', 15):.1f}")
+            i6.metric("Bull %",     f"{inds.get('bull_pct', 0.5):.0%}")
+            if regime.get("reasons"):
+                st.caption("Signals: " + " | ".join(regime["reasons"]))
+    except Exception as e:
+        st.error(f"Regime error: {e}")
+
+    st.markdown("---")
+
+    # ── Event Calendar ────────────────────────────────────────────────────────
+    st.markdown("### 📅 Event Risk Calendar")
+
+    @st.cache_data(ttl=3600)
+    def fetch_events():
+        from core.agents.calendar import get_event_risk
+        return get_event_risk("NIFTY")
+
+    try:
+        evr = fetch_events()
+        ev_color = "#ff4b4b" if evr["score"] >= 7 else "#ffa500" if evr["score"] >= 4 else "#00d4aa"
+        st.markdown(f"**{evr['date']} ({evr['weekday']})** — "
+                    f"<span style='color:{ev_color}'>Event Risk Score: {evr['score']}/10</span>",
+                    unsafe_allow_html=True)
+        st.info(evr["recommendation"])
+        if evr["events_today"]:
+            st.markdown("**Today:**")
+            for e in evr["events_today"]:
+                st.markdown(f"- {e}")
+        if evr["events_upcoming"]:
+            st.markdown("**Upcoming:**")
+            for e in evr["events_upcoming"]:
+                st.markdown(f"- {e}")
+        st.caption(f"F&O Expiry in {evr['fo_expiry_in_days']} day(s)")
+    except Exception as e:
+        st.error(f"Calendar error: {e}")
+
+    st.markdown("---")
+
+    # ── Market Breadth ────────────────────────────────────────────────────────
+    st.markdown("### 📊 Market Breadth (Nifty 50)")
+    st.caption("Cached 15min — takes ~30s to compute")
+
+    @st.cache_data(ttl=900)
+    def fetch_breadth():
+        from core.agents.breadth import get_breadth
+        return get_breadth()
+
+    if st.button("📊 Load Breadth Data", key="breadth_btn"):
+        with st.spinner("Scanning 50 stocks... (~30s)"):
+            try:
+                b = fetch_breadth()
+                st.session_state["breadth"] = b
+            except Exception as e:
+                st.error(f"Breadth error: {e}")
+
+    if "breadth" in st.session_state:
+        b = st.session_state["breadth"]
+        b_color = "#00d4aa" if b["signal"] == "BULLISH" else "#ff4b4b" if b["signal"] == "BEARISH" else "#ffa500"
+        st.markdown(f"<h3 style='color:{b_color}'>Breadth: {b['signal']} ({b['breadth_score']:.0f}/100)</h3>",
+                    unsafe_allow_html=True)
+        st.caption(b["description"])
+
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("Advances",        b.get("advances", 0))
+        b2.metric("Declines",        b.get("declines", 0))
+        b3.metric("Above EMA20",     f"{b.get('above_ema20_pct', 0):.0f}%")
+        b4.metric("Above EMA50",     f"{b.get('above_ema50_pct', 0):.0f}%")
+        b5.metric("RSI > 50",        f"{b.get('rsi_breadth_pct', 0):.0f}%")
+
+        bc1, bc2 = st.columns(2)
+        bc1.metric("New 52W Highs",  b.get("new_52w_high", 0))
+        bc2.metric("New 52W Lows",   b.get("new_52w_low", 0))
+
+        # Breadth bar chart
+        comp = b.get("component_scores", {})
+        if comp:
+            fig_b = go.Figure(go.Bar(
+                x=list(comp.keys()), y=list(comp.values()),
+                marker_color=["#00d4aa" if v > 50 else "#ff4b4b" for v in comp.values()],
+            ))
+            fig_b.add_hline(y=50, line_dash="dash", line_color="#888")
+            fig_b.update_layout(
+                title="Breadth Components", height=250,
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font_color="white",
+                margin=dict(t=40, b=20),
+            )
+            st.plotly_chart(fig_b, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Sector Rotation ───────────────────────────────────────────────────────
+    st.markdown("### 🏭 Sector Rotation")
+
+    @st.cache_data(ttl=900)
+    def fetch_sectors():
+        from core.agents.sector import get_sector_rotation
+        return get_sector_rotation()
+
+    if st.button("🏭 Load Sector Data", key="sector_btn"):
+        with st.spinner("Fetching sector performance..."):
+            try:
+                sr = fetch_sectors()
+                st.session_state["sectors"] = sr
+            except Exception as e:
+                st.error(f"Sector error: {e}")
+
+    if "sectors" in st.session_state:
+        sr = st.session_state["sectors"]
+        reg_color = "#00d4aa" if sr["rotation_regime"] == "RISK_ON" else "#ff4b4b" if sr["rotation_regime"] == "RISK_OFF" else "#ffa500"
+        st.markdown(f"**Regime:** <span style='color:{reg_color}'>{sr['rotation_regime']}</span> — {sr['regime_desc']}",
+                    unsafe_allow_html=True)
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**💰 Money IN:**")
+            for s in sr.get("money_in", []):
+                st.markdown(f"- 🟢 {s}")
+        with sc2:
+            st.markdown("**💸 Money OUT:**")
+            for s in sr.get("money_out", []):
+                st.markdown(f"- 🔴 {s}")
+
+        if sr.get("sectors"):
+            sdf = pd.DataFrame(sr["sectors"])
+            if "sector" in sdf.columns:
+                fig_sr = go.Figure()
+                colors_1d  = ["#00d4aa" if v > 0 else "#ff4b4b" for v in sdf["ret_1d"]]
+                colors_5d  = ["#00d4aa" if v > 0 else "#ff4b4b" for v in sdf["ret_5d"]]
+                fig_sr.add_trace(go.Bar(x=sdf["sector"], y=sdf["ret_1d"],  name="1D %",  marker_color=colors_1d, opacity=0.7))
+                fig_sr.add_trace(go.Bar(x=sdf["sector"], y=sdf["ret_5d"],  name="5D %",  marker_color=colors_5d, opacity=0.5))
+                fig_sr.add_hline(y=0, line_color="#888", line_width=1)
+                fig_sr.update_layout(
+                    title="Sector Returns", height=320, barmode="group",
+                    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font_color="white",
+                    margin=dict(t=40, b=20),
+                )
+                st.plotly_chart(fig_sr, use_container_width=True)
+
+                def color_mom(val):
+                    return "color:#00d4aa;font-weight:bold" if val == "UP" else "color:#ff4b4b;font-weight:bold"
+
+                display_cols = ["sector", "ret_1d", "ret_5d", "ret_20d", "rs_score", "momentum"]
+                st.dataframe(
+                    sdf[display_cols].style.applymap(color_mom, subset=["momentum"]),
+                    use_container_width=True, hide_index=True,
+                )
+
+
+# ══ TAB 6: INDIA + NEWS ═══════════════════════════════════════════════════════
+with tabs[5]:
 
     st.markdown("## 🇮🇳 India Market — News Stocks + Nifty Hedge")
 
@@ -545,8 +901,8 @@ with tabs[3]:
                 st.error(f"Stock scan error: {e}")
 
 
-# ══ TAB 5: BULL VS BEAR DEBATE ═══════════════════════════════════════════════
-with tabs[4]:
+# ══ TAB 7: BULL VS BEAR DEBATE ═══════════════════════════════════════════════
+with tabs[6]:
 
     st.markdown("## 🤖 Bull vs Bear Debate Engine")
     st.markdown("""
@@ -610,8 +966,8 @@ with tabs[4]:
         st.caption(f"Debated at: {dr.get('timestamp', '')}")
 
 
-# ══ TAB 6: HISTORY ═══════════════════════════════════════════════════════════
-with tabs[5]:
+# ══ TAB 8: HISTORY ═══════════════════════════════════════════════════════════
+with tabs[7]:
 
     st.markdown("## 📋 Signal History")
 
