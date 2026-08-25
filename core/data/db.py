@@ -160,6 +160,62 @@ class DailyPnL(Base):
     net_pnl = Column(Float, default=0)
 
 
+class InstitutionalSnapshot(Base):
+    """Daily FII/DII participant-wise derivatives positioning."""
+    __tablename__ = "institutional_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(String(12), nullable=False, index=True)
+    client_type = Column(String(10), nullable=False)   # FII | DII | PRO | CLI
+
+    # Index futures
+    fut_index_long  = Column(Float, default=0)
+    fut_index_short = Column(Float, default=0)
+    fut_index_net   = Column(Float, default=0)
+
+    # Stock futures
+    fut_stock_long  = Column(Float, default=0)
+    fut_stock_short = Column(Float, default=0)
+
+    # Index calls
+    opt_idx_call_long  = Column(Float, default=0)
+    opt_idx_call_short = Column(Float, default=0)
+    opt_idx_call_net   = Column(Float, default=0)
+
+    # Index puts
+    opt_idx_put_long   = Column(Float, default=0)
+    opt_idx_put_short  = Column(Float, default=0)
+    opt_idx_put_net    = Column(Float, default=0)
+
+    # Stock options
+    opt_stk_call_long  = Column(Float, default=0)
+    opt_stk_call_short = Column(Float, default=0)
+    opt_stk_put_long   = Column(Float, default=0)
+    opt_stk_put_short  = Column(Float, default=0)
+
+    # Totals
+    total_long  = Column(Float, default=0)
+    total_short = Column(Float, default=0)
+
+    # Derived bias scores
+    fut_bias  = Column(Float, default=0)
+    call_bias = Column(Float, default=0)
+    put_bias  = Column(Float, default=0)
+
+    # Cash equity (for FII/DII rows only)
+    cash_buy  = Column(Float, default=0)
+    cash_sell = Column(Float, default=0)
+    cash_net  = Column(Float, default=0)
+
+    # FII regime (only for FII row)
+    regime    = Column(String(30), default="")
+    composite = Column(Float, default=0)
+
+    __table_args__ = (
+        Index("ix_inst_date_client", "date", "client_type"),
+    )
+
+
 # ---- Init ------------------------------------------------------------
 
 def init_db():
@@ -323,4 +379,44 @@ class DBManager:
             .order_by(DailyPnL.date.desc())
             .limit(days)
             .all()
+        )
+
+    # Institutional Snapshots
+    def save_institutional_snapshot(self, rows: List[dict]):
+        """Upsert participant-wise snapshot rows (one per client_type per date)."""
+        try:
+            for row in rows:
+                existing = (
+                    self.session.query(InstitutionalSnapshot)
+                    .filter_by(date=row.get("date"), client_type=row.get("client_type", ""))
+                    .first()
+                )
+                allowed = {c.name for c in InstitutionalSnapshot.__table__.columns}
+                filtered = {k: v for k, v in row.items() if k in allowed}
+                if existing:
+                    for k, v in filtered.items():
+                        setattr(existing, k, v)
+                else:
+                    self.session.add(InstitutionalSnapshot(**filtered))
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Error saving institutional snapshot: {e}")
+
+    def get_institutional_history(self, client_type: str = "FII",
+                                  days: int = 30) -> List[InstitutionalSnapshot]:
+        return (
+            self.session.query(InstitutionalSnapshot)
+            .filter_by(client_type=client_type)
+            .order_by(InstitutionalSnapshot.date.desc())
+            .limit(days)
+            .all()
+        )
+
+    def get_latest_institutional(self, client_type: str = "FII") -> Optional[InstitutionalSnapshot]:
+        return (
+            self.session.query(InstitutionalSnapshot)
+            .filter_by(client_type=client_type)
+            .order_by(InstitutionalSnapshot.date.desc())
+            .first()
         )

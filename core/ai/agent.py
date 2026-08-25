@@ -45,6 +45,8 @@ You have access to:
 - ML model predictions (XGBoost + LightGBM ensemble)
 - News sentiment from ET, Moneycontrol, Mint
 - Technical indicators (EMA, RSI, MACD, Bollinger Bands, VWAP)
+- FII/DII institutional positioning (participant-wise futures, calls, puts bias)
+- Strike-level institutional zone analysis (call walls, put walls, gamma pin)
 - Current positions and P&L
 
 Your role:
@@ -52,13 +54,17 @@ Your role:
 2. Suggest precise entry, target, and stop-loss levels
 3. Highlight key risks and market conditions
 4. Summarize market state in plain language
+5. Interpret FII/DII positioning honestly — treat it as one factor, not a direct copy signal
 
 Rules:
 - Always mention VIX level and its impact
 - Always check PCR for market direction confirmation
+- Always mention FII regime if institutional data is present
+- Treat FII call-selling as a bearish signal only when confirmed by futures/cash
+- Never claim to know exactly which FII sold a specific strike — this is inference, not fact
 - Consider time-of-day (avoid F&O trades in last 30 min)
 - Be concise — traders need quick, actionable insights
-- Format numbers clearly: ₹24,500, PCR=1.23, VIX=14.5
+- Format numbers clearly: ₹24,500, PCR=1.23, VIX=14.5, FII=BEARISH
 
 Respond in 3-5 sentences unless asked for detailed analysis."""
 
@@ -158,6 +164,37 @@ Respond in 3-5 sentences unless asked for detailed analysis."""
             ctx_lines.append(
                 f"Order Flow: {of.get('signal','?')} | "
                 f"OI Change: CE={of.get('ce_oi_chg',0):+,} PE={of.get('pe_oi_chg',0):+,}"
+            )
+
+        if "institutional" in context:
+            inst = context["institutional"]
+            regime    = inst.get("regime", "?")
+            composite = inst.get("composite", 0)
+            fut_bias  = inst.get("futures_bias", 0)
+            call_bias = inst.get("call_bias", 0)
+            put_bias  = inst.get("put_bias", 0)
+            fii_cash  = inst.get("fii_cash_net", 0)
+            dii_cash  = inst.get("dii_cash_net", 0)
+            divs      = ", ".join(inst.get("divergences", [])) or "none"
+            ctx_lines.append(
+                f"Institutional: FII={regime} (composite={composite:+.3f}) | "
+                f"Futures={fut_bias:+.3f} Calls={call_bias:+.3f} Puts={put_bias:+.3f} | "
+                f"Cash: FII={fii_cash:+,}Cr DII={dii_cash:+,}Cr | "
+                f"Divergences: {divs}"
+            )
+
+        if "strike_analysis" in context:
+            sa = context["strike_analysis"]
+            call_walls = [str(w["strike"]) for w in sa.get("call_walls", [])[:3]]
+            put_walls  = [str(w["strike"]) for w in sa.get("put_walls", [])[:3]]
+            gamma_pin  = sa.get("gamma_pin_strike", "?")
+            direction  = sa.get("inferred_direction", "?")
+            conf       = sa.get("direction_confidence", 0)
+            ctx_lines.append(
+                f"Strike Analysis: Inferred={direction} (conf={conf:.0%}) | "
+                f"Call Walls={','.join(call_walls) or '?'} | "
+                f"Put Walls={','.join(put_walls) or '?'} | "
+                f"GammaPin={gamma_pin}"
             )
 
         ctx_block = "\n".join(ctx_lines)

@@ -46,6 +46,7 @@ class FeatureEngineer:
         vix: float = 0.0,
         pcr: float = 1.0,
         max_pain: float = 0.0,
+        institutional: Optional[Dict] = None,
     ) -> pd.DataFrame:
         """
         Build full feature DataFrame from all sources.
@@ -84,10 +85,14 @@ class FeatureEngineer:
         if max_pain > 0 and "close" in df.columns:
             df["max_pain_dist"] = (df["close"] - max_pain) / max_pain
 
-        # 7. Time features
+        # 7. Institutional features
+        if institutional:
+            df = self._institutional_features(df, institutional)
+
+        # 8. Time features
         df = self._time_features(df)
 
-        # 8. Target labels
+        # 9. Target labels
         df = self._add_labels(df)
 
         df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill()
@@ -247,6 +252,62 @@ class FeatureEngineer:
         df["iv_skew"]        = atm_iv_pe - atm_iv_ce
         df["oi_buildup"]     = (df["net_oi_chg"] > 0).astype(int)  # put writing = bullish
         df["iv_regime"]      = (atm_iv_ce > 20).astype(int)  # high IV regime
+
+        return df
+
+    # ── Institutional features ─────────────────────────────────────────────────
+
+    def _institutional_features(self, df: pd.DataFrame, inst: Dict) -> pd.DataFrame:
+        """
+        Add FII/DII positioning features from InstitutionalPositionAnalyzer output.
+        All are scalar snapshots broadcast across all rows (daily resolution).
+        """
+        from core.institutional.positioning import REGIME_SCORES
+
+        df["fii_composite"]       = inst.get("composite", 0.0)
+        df["fii_futures_bias"]    = inst.get("futures_bias", 0.0)
+        df["fii_call_bias"]       = inst.get("call_bias", 0.0)
+        df["fii_put_bias"]        = inst.get("put_bias", 0.0)
+        df["fii_regime_score"]    = inst.get("regime_score", 0.0)
+
+        # Raw positions (normalised by total to be scale-invariant)
+        fut_total = inst.get("fii_fut_long", 0) + inst.get("fii_fut_short", 0) + 1
+        df["fii_fut_long_pct"]    = inst.get("fii_fut_long", 0) / fut_total
+        df["fii_fut_short_pct"]   = inst.get("fii_fut_short", 0) / fut_total
+        df["fii_fut_net_norm"]    = inst.get("fii_fut_net", 0) / fut_total
+
+        call_total = inst.get("fii_call_long", 0) + inst.get("fii_call_short", 0) + 1
+        df["fii_call_long_pct"]   = inst.get("fii_call_long", 0) / call_total
+        df["fii_call_short_pct"]  = inst.get("fii_call_short", 0) / call_total
+
+        put_total  = inst.get("fii_put_long", 0) + inst.get("fii_put_short", 0) + 1
+        df["fii_put_long_pct"]    = inst.get("fii_put_long", 0) / put_total
+        df["fii_put_short_pct"]   = inst.get("fii_put_short", 0) / put_total
+
+        # Cash flow (crores, kept as-is; ML will learn the scale)
+        df["fii_cash_net"]        = inst.get("fii_cash_net", 0)
+        df["dii_cash_net"]        = inst.get("dii_cash_net", 0)
+        df["dii_absorption"]      = inst.get("dii_absorption", 0.0)
+
+        # Velocity (day-over-day change)
+        vel = inst.get("velocity", {})
+        df["fii_composite_delta"] = vel.get("composite_delta", 0.0)
+        df["fii_fut_bias_delta"]  = vel.get("futures_bias_delta", 0.0)
+        df["fii_call_bias_delta"] = vel.get("call_bias_delta", 0.0)
+        df["fii_put_bias_delta"]  = vel.get("put_bias_delta", 0.0)
+
+        # Divergence flags as binary features
+        divs = set(inst.get("divergences", []))
+        df["div_fut_bull_opt_bear"]  = int("FUTURES_BULLISH_OPTIONS_BEARISH" in divs)
+        df["div_fut_bear_opt_bull"]  = int("FUTURES_BEARISH_OPTIONS_BULLISH" in divs)
+        df["div_dii_absorbing"]      = int("DII_ABSORBING_FII_SELLING" in divs)
+        df["div_premium_selling"]    = int("CALL_SHORT_PUT_SHORT_PREMIUM_SELLING" in divs)
+
+        # One-hot regime (7 classes → 7 binary columns)
+        regime = inst.get("regime", "NEUTRAL")
+        for r in ["AGGRESSIVE_BULLISH", "BULLISH", "MILD_BULLISH", "NEUTRAL",
+                  "MILD_BEARISH", "BEARISH", "AGGRESSIVE_BEARISH"]:
+            df[f"regime_{r.lower()}"] = int(regime == r)
 
         return df
 

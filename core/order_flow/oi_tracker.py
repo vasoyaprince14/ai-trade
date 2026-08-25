@@ -31,6 +31,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from core.data.nse_scraper import get_scraper, NSEScraper
+from core.data.nse_participant import get_participant_data
+from core.order_flow.tape_reader import TapeReader
 from config.settings import config
 
 
@@ -54,6 +56,11 @@ class OITracker:
         self._oi_history: deque = deque(maxlen=100)
         self._last_snapshot: Optional[pd.DataFrame] = None
         self._last_spot: float = 0
+
+        # Tape reader — institutional order flow
+        self.tape_reader = TapeReader(symbol)
+        # FII/DII participant data
+        self._participant = get_participant_data()
 
         # Try importing the ai-trader flow detector
         self._flow_detector = None
@@ -290,6 +297,85 @@ class OITracker:
             "skew": round(skew, 2),
         }
 
+    # ---- Tape + Institutional Flow ----------------------------------------
+
+    def tick_tape(self, expiry: Optional[str] = None):
+        """
+        Poll option chain → detect institutional events via TapeReader.
+        Call every 30-60 seconds during market hours.
+        Returns list of new TapeEvents.
+        """
+        return self.tape_reader.tick(expiry)
+
+    def get_tape_summary(self) -> Dict:
+        """Full tape reading summary + FII/DII positioning."""
+        tape = self.tape_reader.get_flow_summary()
+        participant = self._participant.get_full_picture()
+        return {
+            "tape": tape,
+            "participant": participant,
+            "combined_bias": self._merge_bias(
+                tape.get("bias", "NEUTRAL"),
+                participant.get("smart_money_bias", "NEUTRAL"),
+            ),
+        }
+
+    def get_model_features(self, expiry: Optional[str] = None) -> Dict:
+        """
+        Extract 100+ features for ML model decision making.
+        Combines: tape reader + option chain + FII/DII data.
+        """
+        # Tape features (100+ features)
+        features = self.tape_reader.extract_features()
+
+        # Add VIX
+        vix = self.scraper.get_vix()
+        features["f_vix"] = vix or 0
+
+        # Add FII/DII
+        participant = self._participant.get_participant_summary()
+        fii = participant.get("participants", {}).get("FII", {})
+        dii = participant.get("participants", {}).get("DII", {})
+        pro = participant.get("participants", {}).get("PRO", {})
+        features["f_fii_net_futures"]  = fii.get("net_futures", 0)
+        features["f_fii_net_calls"]    = fii.get("net_calls",   0)
+        features["f_fii_net_puts"]     = fii.get("net_puts",    0)
+        features["f_fii_bias_score"]   = fii.get("bias_score",  0)
+        features["f_dii_net_futures"]  = dii.get("net_futures", 0)
+        features["f_dii_net_calls"]    = dii.get("net_calls",   0)
+        features["f_dii_net_puts"]     = dii.get("net_puts",    0)
+        features["f_dii_bias_score"]   = dii.get("bias_score",  0)
+        features["f_pro_net_futures"]  = pro.get("net_futures", 0)
+        features["f_pro_net_calls"]    = pro.get("net_calls",   0)
+        features["f_pro_net_puts"]     = pro.get("net_puts",    0)
+
+        bias_map = {"STRONGLY_BULLISH": 2, "BULLISH": 1, "NEUTRAL": 0,
+                    "BEARISH": -1, "STRONGLY_BEARISH": -2}
+        features["f_fii_bias_numeric"] = bias_map.get(fii.get("bias", "NEUTRAL"), 0)
+        features["f_dii_bias_numeric"] = bias_map.get(dii.get("bias", "NEUTRAL"), 0)
+        features["f_smart_money_bias"] = bias_map.get(
+            participant.get("combined_bias", "NEUTRAL"), 0
+        )
+
+        return features
+
+    def _merge_bias(self, tape_bias: str, smart_bias: str) -> str:
+        """Combine tape bias + smart money bias into single view."""
+        score_map = {
+            "STRONGLY_BULLISH": 2, "BULLISH": 1, "NEUTRAL": 0,
+            "BEARISH": -1, "STRONGLY_BEARISH": -2,
+        }
+        score = score_map.get(tape_bias, 0) + score_map.get(smart_bias, 0)
+        if score >= 3:
+            return "STRONGLY_BULLISH"
+        elif score >= 1:
+            return "BULLISH"
+        elif score <= -3:
+            return "STRONGLY_BEARISH"
+        elif score <= -1:
+            return "BEARISH"
+        return "NEUTRAL"
+
     # ---- Summary for Dashboard ----------------------------------------
 
     def get_market_summary(self) -> Dict:
@@ -298,9 +384,16 @@ class OITracker:
         if not snap:
             return {}
         vix = self.scraper.get_vix()
+        tape = self.tape_reader.get_flow_summary()
         return {
             **snap,
             "vix": vix,
             "pcr_trend": self.get_pcr_trend(),
             "market_open": self.scraper.is_market_open(),
+            # Institutional tape data
+            "tape_bias":     tape.get("bias", "NEUTRAL"),
+            "tape_events":   tape.get("total_events", 0),
+            "hot_strikes":   tape.get("hot_strikes", []),
+            "big_players":   tape.get("big_players", []),
+            "recent_tape":   tape.get("recent_tape", []),
         }
