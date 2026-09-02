@@ -1397,57 +1397,138 @@ with tabs[6]:
 # ══ TAB 8: INDIA + NEWS ═══════════════════════════════════════════════════════
 with tabs[7]:
 
-    st.markdown("## 🇮🇳 India Market — News Stocks + Nifty Hedge")
+    st.markdown("## 🇮🇳 Nifty Intraday Signal + India Market")
+    st.caption("Run `python3 nifty/engine.py` for live Telegram alerts every 5 min during market hours (09:15–15:30 IST)")
+
+    # ── Run Now button ─────────────────────────────────────────────────────────
+    nr_b1, nr_b2, _ = st.columns([1, 1, 5])
+    with nr_b1:
+        nifty_run_now = st.button("▶ Scan Now", key="nifty_run", type="primary")
+    with nr_b2:
+        if st.button("⟳ Refresh", key="nifty_refresh"):
+            st.cache_data.clear(); st.rerun()
+
+    if nifty_run_now:
+        with st.spinner("Scanning Nifty (5m VWAP + EMA + PCR + IV)..."):
+            try:
+                from nifty.strategy import analyze_nifty
+                import nifty.strategy as _ns
+                _orig_sess = _ns._get_session
+                _ns._get_session = lambda _: "MID_SESSION"   # allow scan anytime
+                _nsig = analyze_nifty()
+                _ns._get_session = _orig_sess
+                import json as _j
+                _ndata = {
+                    "action": _nsig.action, "strength": _nsig.strength,
+                    "score": _nsig.score, "max_score": _nsig.max_score,
+                    "confidence": _nsig.confidence, "spot": _nsig.spot,
+                    "atm_strike": _nsig.atm_strike, "expiry": _nsig.expiry,
+                    "entry_ce": _nsig.entry_ce, "entry_pe": _nsig.entry_pe,
+                    "sl_pts": _nsig.sl_pts, "sl_spot": _nsig.sl_spot,
+                    "target_spot": _nsig.target_spot, "rr": _nsig.rr,
+                    "pcr": _nsig.pcr, "atm_iv": _nsig.atm_iv, "vwap": _nsig.vwap,
+                    "trend_15m": _nsig.trend_15m, "session": _nsig.session,
+                    "reasons": _nsig.reasons, "timestamp": str(_nsig.timestamp),
+                }
+                with open("/tmp/nifty_signal.json", "w") as _f: _j.dump(_ndata, _f)
+                _ac = {"BUY_CE":"🟢","BUY_PE":"🔴","SELL_STRADDLE":"⚡"}.get(_nsig.action,"⏳")
+                st.success(f"{_ac} {_nsig.action} {_nsig.strength} — {_nsig.score}/20 | Spot: {_nsig.spot:.0f} | PCR: {_nsig.pcr:.2f}")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"Scan error: {_e}")
+
+    st.divider()
+
+    # ── Load signal ────────────────────────────────────────────────────────────
+    nifty_live = load_nifty_signal()
 
     col_nifty, col_scan = st.columns([1, 2])
 
     with col_nifty:
-        st.markdown("### Nifty F&O Signal")
+        st.markdown("### Nifty Intraday Signal")
 
-        # Live signal from loop engine (real-time)
-        nifty_live = load_nifty_signal()
         if nifty_live:
             n_action = nifty_live.get("action", "WAIT")
-            n_color  = {"BUY_CE": "#00d4aa", "BUY_PE": "#ff4b4b", "WAIT": "#ffa500"}.get(n_action, "#ffa500")
-            st.markdown(f"<h2 style='color:{n_color}'>{n_action}</h2>", unsafe_allow_html=True)
-            st.metric("Nifty Spot", f"₹{nifty_live.get('spot', 0):,.0f}")
-            st.metric("Strike",     f"₹{nifty_live.get('strike', 0):,.0f}")
-            st.metric("PCR",        f"{nifty_live.get('pcr', 0):.2f}")
-            st.metric("India VIX",  f"{nifty_live.get('vix', 0):.2f}")
-            st.metric("Tape Bias",  f"{nifty_live.get('tape_bias', 0):+.2f}")
-            if nifty_live.get("entry"):
-                st.metric("Entry",     f"₹{nifty_live.get('entry', 0):,.2f}")
-                st.metric("Stop Loss", f"₹{nifty_live.get('stop_loss', 0):,.2f}")
-                st.metric("Target",    f"₹{nifty_live.get('target', 0):,.2f}")
-            ts = nifty_live.get("timestamp", "")[:19].replace("T", " ")
-            st.caption(f"Updated: {ts}")
-            st.markdown("---")
+            n_score  = nifty_live.get("score", 0)
+            n_maxsc  = nifty_live.get("max_score", 20)
+            n_conf   = nifty_live.get("confidence", 0)
+            n_strength = nifty_live.get("strength", "WAIT")
+            n_color  = {"BUY_CE": "#00d4aa", "BUY_PE": "#ff4b4b",
+                        "SELL_STRADDLE": "#fbbf24"}.get(n_action, "#ffa500")
+            n_emoji  = {"BUY_CE":"🟢 BUY CE","BUY_PE":"🔴 BUY PE",
+                        "SELL_STRADDLE":"⚡ SELL STRADDLE"}.get(n_action,"⏳ WAIT")
+            ts_n     = (nifty_live.get("timestamp","") or "")[:16].replace("T"," ")
 
-        st.markdown("### Nifty Hedge Signal")
-        with st.spinner("Loading Nifty data..."):
-            try:
-                _, nh = fetch_india()
+            st.markdown(f"""
+<div style='background:#1a1d2e;border-radius:12px;padding:1.2rem 1.5rem;
+border-left:5px solid {n_color};margin-bottom:1rem;'>
+  <div style='color:{n_color};font-size:1.6rem;font-weight:800;'>{n_emoji}</div>
+  <div style='color:#888;font-size:0.85rem;'>{ts_n} IST</div>
+  <div style='margin-top:0.5rem;'>
+    <span style='color:white;font-size:1.2rem;font-weight:700;'>{n_score}/{n_maxsc}</span>
+    <span style='color:#888;font-size:0.85rem;'> pts ({n_conf:.0%} conf) [{n_strength}]</span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
-                hedge_color = {"BUY CE": "#00d4aa", "BUY PE": "#ff4b4b", "HOLD": "#ffa500"}.get(nh["hedge"], "#888")
-                st.markdown(f"<h2 style='color:{hedge_color}'>{nh['hedge']}</h2>", unsafe_allow_html=True)
-                st.metric("Nifty 50", f"{nh.get('nifty_price', 0):,.2f}")
-                st.metric("RSI (14)", f"{nh.get('rsi', 0):.1f}")
-                st.metric("1M Return", f"{nh.get('ret_1m', 0):+.2f}%")
-                st.metric("ATR (daily)", f"{nh.get('atr', 0):.0f} pts")
-                st.markdown(f"**Strength:** {nh.get('strength', 'N/A')}")
-                st.info(nh.get("reason", ""))
+            # Score bar
+            bar_c = n_color if n_action != "WAIT" else "#ffa500"
+            st.markdown(f"""
+<div style='background:#1e2130;border-radius:6px;height:8px;margin-bottom:0.5rem;'>
+  <div style='background:{bar_c};height:100%;width:{n_score/n_maxsc*100:.0f}%;border-radius:6px;'></div>
+</div>
+<p style='color:#888;font-size:0.75rem;'>Threshold: 12/20 · Strong: 16/20</p>""",
+                        unsafe_allow_html=True)
 
-                # Hedge sizing guide
-                st.markdown("#### Hedge Size Guide")
-                portfolio = st.number_input("Portfolio value (₹)", value=500000, step=50000)
-                hedge_pct  = {"STRONG": 0.05, "MODERATE": 0.02, "NONE": 0}.get(nh.get("strength","NONE"), 0)
-                hedge_amt  = portfolio * hedge_pct
-                nifty_lots = max(1, int(hedge_amt / (nh.get("nifty_price", 24000) * 25)))
-                st.metric("Hedge allocation", f"₹{hedge_amt:,.0f}  ({hedge_pct*100:.0f}%)")
-                if hedge_pct > 0:
-                    st.metric("Suggested Nifty lots", f"{nifty_lots} lot(s)")
-            except Exception as e:
-                st.error(f"Nifty data error: {e}")
+            # Metrics
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Spot",     f"₹{nifty_live.get('spot',0):,.0f}")
+            mc2.metric("ATM",      f"₹{nifty_live.get('atm_strike',0):,}")
+            mc1.metric("PCR",      f"{nifty_live.get('pcr',0):.3f}")
+            mc2.metric("ATM IV",   f"{nifty_live.get('atm_iv',0):.1f}%")
+            mc1.metric("VWAP",     f"₹{nifty_live.get('vwap',0):,.0f}")
+            mc2.metric("15m Trend",nifty_live.get("trend_15m","—"))
+
+            if n_action not in ("WAIT",):
+                st.markdown("**Trade Levels**")
+                if n_action == "BUY_CE":
+                    st.metric("CE LTP (entry)", f"₹{nifty_live.get('entry_ce',0):.0f}")
+                elif n_action == "BUY_PE":
+                    st.metric("PE LTP (entry)", f"₹{nifty_live.get('entry_pe',0):.0f}")
+                elif n_action == "SELL_STRADDLE":
+                    st.metric("CE+PE premium", f"₹{nifty_live.get('entry_ce',0):.0f} + {nifty_live.get('entry_pe',0):.0f}")
+                mc3, mc4 = st.columns(2)
+                mc3.metric("SL Spot",    f"₹{nifty_live.get('sl_spot',0):,.0f}")
+                mc4.metric("Target",     f"₹{nifty_live.get('target_spot',0):,.0f}")
+                mc3.metric("SL (pts)",   f"{nifty_live.get('sl_pts',0):.0f}")
+                mc4.metric("R:R",        f"1:{nifty_live.get('rr',0):.1f}")
+
+            reasons_n = nifty_live.get("reasons", [])
+            if reasons_n:
+                st.markdown("**Why:**")
+                for r in reasons_n:
+                    st.markdown(f"<div style='font-size:0.82rem;color:#aaa;padding:2px 0;'>• {r}</div>",
+                                unsafe_allow_html=True)
+        else:
+            st.info("No signal yet — click **Scan Now** above, or run: `python3 nifty/engine.py`")
+            st.code("python3 nifty/engine.py", language="bash")
+            st.markdown("""
+**Engine scans every 5 min during market hours (09:15–15:30 IST)**
+Sends Telegram alert on BUY_CE / BUY_PE / SELL_STRADDLE
+Threshold: **12/20** points | Strong: **16/20**
+""")
+
+        # Hedge signal
+        st.divider()
+        st.markdown("### Portfolio Hedge")
+        try:
+            _, nh = fetch_india()
+            hedge_color = {"BUY CE": "#00d4aa", "BUY PE": "#ff4b4b", "HOLD": "#888"}.get(nh["hedge"], "#888")
+            st.markdown(f"<b style='color:{hedge_color};font-size:1.1rem;'>{nh['hedge']}</b> "
+                        f"<span style='color:#888;font-size:0.85rem;'>({nh.get('strength','')}) "
+                        f"RSI {nh.get('rsi',0):.0f}</span>", unsafe_allow_html=True)
+            st.caption(nh.get("reason",""))
+        except Exception as _he:
+            st.caption(f"Hedge error: {_he}")
 
     with col_scan:
         st.markdown("### Top NSE Stocks (Momentum + News)")
