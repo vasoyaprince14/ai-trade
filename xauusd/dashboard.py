@@ -2256,337 +2256,503 @@ with tabs[10]:
         """)
 
 
-# ══ TAB 12: ORDER FLOW STRATEGY ══════════════════════════════════════════════
+
+# ══ TAB 12: ORDER FLOW STRATEGY (v3 — 40-pt scoring) ════════════════════════
 with tabs[11]:
 
-    st.markdown("## 🧠 XAUUSD Heavy Order Flow Strategy")
-    st.caption("SMC (Order Blocks + FVG + BOS/CHoCH + Liquidity) + Volume Profile + CVD + VWAP + ICT Killzones")
-
-    @st.cache_data(ttl=300)
-    def fetch_of_signal():
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _of_load_signal():
         try:
             with open("/tmp/xauusd_of_signal.json") as f:
                 return json.load(f)
         except Exception:
             return None
 
-    of_sig = fetch_of_signal()
+    def _of_action_color(action):
+        return {"BUY": "#00d4aa", "SELL": "#ff4b4b"}.get(action, "#ffa500")
 
-    # ── Top control strip ─────────────────────────────────────────────────────
-    oc1, oc2, oc3 = st.columns([2, 1, 1])
-    with oc1:
-        st.info(
-            "Engine: `python3 xauusd/of_engine.py`  |  "
-            "Updates every 5 min  |  Signals only during London/NY killzones"
-        )
-    with oc2:
-        if st.button("Run Analysis Now", key="of_run"):
-            with st.spinner("Running full order flow analysis (~10s)..."):
-                try:
-                    from xauusd.of_strategy import analyze_order_flow
-                    _s = analyze_order_flow()
-                    import json as _j
-                    with open("/tmp/xauusd_of_signal.json", "w") as _f:
-                        _j.dump({
-                            "action": _s.action, "strength": _s.strength,
-                            "entry": _s.entry, "stop_loss": _s.stop_loss,
-                            "target1": _s.target1, "target2": _s.target2,
-                            "target3": _s.target3, "risk_reward": _s.risk_reward,
-                            "score": _s.score, "confidence": _s.confidence,
-                            "atr": _s.atr, "killzone": _s.killzone,
-                            "htf_bias": _s.htf_bias, "structure": _s.structure,
-                            "ob_level": _s.ob_level, "ob_type": _s.ob_type,
-                            "fvg_top": _s.fvg_top, "fvg_bot": _s.fvg_bot,
-                            "fvg_type": _s.fvg_type, "poc": _s.poc,
-                            "vah": _s.vah, "val": _s.val, "vwap": _s.vwap,
-                            "cvd_bias": _s.cvd_bias, "liq_swept": _s.liq_swept,
-                            "liq_level": _s.liq_level, "reasons": _s.reasons,
-                            "timestamp": str(_s.timestamp),
-                        }, _f, indent=2)
-                    st.success(f"Done — {_s.action} score={_s.score}/20")
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"Error: {_e}")
-    with oc3:
-        if st.button("Refresh", key="of_refresh"):
+    def _of_action_emoji(action):
+        return {"BUY": "🟢", "SELL": "🔴"}.get(action, "⏳")
+
+    # ── page header ──────────────────────────────────────────────────────────
+    st.markdown("""
+<h2 style='margin-bottom:0;'>🧠 Order Flow Strategy <span style='font-size:0.7rem;color:#888;'>v3 · 40-pt scoring</span></h2>
+<p style='color:#888;margin-top:4px;font-size:0.9rem;'>
+SMC (OB + FVG + BOS/CHoCH + Liquidity) · Volume Profile · CVD ·
+Tape Reader · OTE · Premium/Discount · EQH/EQL · ICT Killzones · Self-Learning
+</p>
+""", unsafe_allow_html=True)
+
+    # ── action buttons ────────────────────────────────────────────────────────
+    btn1, btn2, btn3 = st.columns([1,1,4])
+    with btn1:
+        run_now = st.button("▶ Run Now", key="of_run_v3", type="primary")
+    with btn2:
+        if st.button("⟳ Refresh", key="of_refresh_v3"):
             st.cache_data.clear()
             st.rerun()
+    with btn3:
+        st.caption("Engine: `python3 xauusd/of_engine.py` — signals fire at 22/40 during London/NY killzones")
 
-    st.markdown("---")
+    if run_now:
+        with st.spinner("Running 40-point order flow analysis (~15s)..."):
+            try:
+                from xauusd.of_strategy import analyze_order_flow
+                _s = analyze_order_flow()
+                import json as _j
+                with open("/tmp/xauusd_of_signal.json","w") as _f:
+                    _j.dump({k: getattr(_s,k) if not callable(getattr(_s,k)) else None
+                              for k in _s.__dataclass_fields__
+                              if k != "timestamp"} | {"timestamp": str(_s.timestamp),
+                              "max_score": _s.max_score}, _f, indent=2, default=str)
+                st.success(f"{_of_action_emoji(_s.action)} {_s.action} {_s.strength} — score {_s.score}/{_s.max_score}")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+
+    st.divider()
+
+    of_sig = _of_load_signal()
 
     if of_sig is None:
-        st.warning("No signal yet. Click **Run Analysis Now** or start the engine.")
+        st.info("No signal yet — click **Run Now** or start the engine.")
         st.code("python3 xauusd/of_engine.py", language="bash")
+        st.stop()
+
+    action   = of_sig.get("action","WAIT")
+    strength = of_sig.get("strength","WAIT")
+    score    = of_sig.get("score",0)
+    max_sc   = of_sig.get("max_score",40)
+    conf     = of_sig.get("confidence",0)
+    entry    = of_sig.get("entry",0)
+    sl       = of_sig.get("stop_loss",0)
+    tp1      = of_sig.get("target1",0)
+    tp2      = of_sig.get("target2",0)
+    tp3      = of_sig.get("target3",0)
+    rr       = of_sig.get("risk_reward",0)
+    ts_str   = (of_sig.get("timestamp","") or "")[:19].replace("T"," ")
+    reasons  = of_sig.get("reasons",[])
+
+    act_col  = _of_action_color(action)
+    act_emoji= _of_action_emoji(action)
+    risk_pts = abs(entry - sl) if sl else 0
+
+    # ══ SECTION 1: SIGNAL CARD ═══════════════════════════════════════════════
+    kz   = of_sig.get("killzone","") or "No killzone"
+    htf  = of_sig.get("htf_bias","")
+    tape_bias = of_sig.get("cvd_bias","") or "NEUTRAL"
+
+    st.markdown(f"""
+<div style='background:#1a1d2e;border-radius:14px;padding:1.4rem 1.8rem;
+border-left:6px solid {act_col};margin-bottom:1.2rem;'>
+  <div style='display:flex;justify-content:space-between;align-items:center;'>
+    <div>
+      <span style='color:{act_col};font-size:2rem;font-weight:800;letter-spacing:1px;'>
+        {act_emoji} {action} {strength}
+      </span>
+      <span style='color:#888;font-size:0.9rem;margin-left:12px;'>{ts_str} UTC</span>
+    </div>
+    <div style='text-align:right;'>
+      <span style='color:white;font-size:1.6rem;font-weight:700;'>{score}/{max_sc}</span>
+      <span style='color:#888;font-size:0.85rem;'> pts ({conf:.0%} conf)</span>
+    </div>
+  </div>
+  <div style='margin-top:0.8rem;display:flex;gap:2rem;flex-wrap:wrap;'>
+    <span style='color:#aaa;'>📍 KZ: <b style='color:white;'>{kz}</b></span>
+    <span style='color:#aaa;'>📊 HTF: <b style='color:white;'>{htf}</b></span>
+    <span style='color:#aaa;'>🌊 Tape: <b style='color:white;'>{tape_bias}</b></span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # Score progress bar
+    score_pct = score / max_sc
+    bar_color = act_col if score_pct >= 0.55 else "#ffa500"
+    st.markdown(f"""
+<div style='background:#1e2130;border-radius:8px;height:12px;margin-bottom:0.3rem;overflow:hidden;'>
+  <div style='background:{bar_color};height:100%;width:{score_pct*100:.1f}%;border-radius:8px;
+  transition:width 0.5s ease;'></div>
+</div>
+<p style='color:#888;font-size:0.8rem;margin-top:0;'>
+  Score: {score}/{max_sc} — Need 22 to trade, 28 for STRONG | Threshold line: ━━━━━━━━━━
+</p>
+""", unsafe_allow_html=True)
+
+    # ══ SECTION 2: TRADE LEVELS ══════════════════════════════════════════════
+    if action in ("BUY","SELL"):
+        st.markdown("### Trade Levels")
+        tc1,tc2,tc3,tc4,tc5,tc6 = st.columns(6)
+        tc1.metric("Entry",         f"${entry:.2f}")
+        tc2.metric("Stop Loss",     f"${sl:.2f}",
+                   delta=f"-{risk_pts:.2f} pts", delta_color="inverse")
+        tc3.metric("TP1  (1.5R)",   f"${tp1:.2f}",
+                   delta=f"+{abs(tp1-entry):.2f}" if action=="BUY" else f"-{abs(tp1-entry):.2f}")
+        tc4.metric("TP2  (2.5R)",   f"${tp2:.2f}",
+                   delta=f"+{abs(tp2-entry):.2f}" if action=="BUY" else f"-{abs(tp2-entry):.2f}")
+        tc5.metric("TP3  (4R)",     f"${tp3:.2f}",
+                   delta=f"+{abs(tp3-entry):.2f}" if action=="BUY" else f"-{abs(tp3-entry):.2f}")
+        tc6.metric("Risk:Reward",   f"1:{rr:.1f}")
+
+        # Trade plan guide
+        st.markdown(f"""
+<div style='background:#1a1d2e;border-radius:10px;padding:1rem 1.4rem;margin-top:0.5rem;
+border:1px solid #2d3250;font-size:0.9rem;'>
+  <b style='color:{act_col};'>Trade Plan:</b>
+  &nbsp; Enter @ <b>${entry:.2f}</b>
+  &nbsp;|&nbsp; SL @ <b>${sl:.2f}</b> ({risk_pts:.1f} pts risk)
+  &nbsp;|&nbsp; Take 50% off @ TP1 <b>${tp1:.2f}</b>, move SL to BE
+  &nbsp;|&nbsp; Let rest run to TP2 <b>${tp2:.2f}</b>
+  &nbsp;|&nbsp; Trail stop for TP3 <b>${tp3:.2f}</b>
+</div>
+""", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ══ SECTION 3: MARKET CONTEXT (clean grid) ═══════════════════════════════
+    st.markdown("### Market Context")
+
+    cc1, cc2, cc3 = st.columns(3)
+
+    with cc1:
+        st.markdown("**Structure & Levels**")
+        struct = of_sig.get("structure","") or "—"
+        sc = "#00d4aa" if "UP" in struct else ("#ff4b4b" if "DOWN" in struct else "#888")
+        st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.5rem;'>"
+                    f"<span style='color:#888;font-size:0.8rem;'>4H Structure</span><br>"
+                    f"<b style='color:{sc};font-size:1.1rem;'>{struct}</b>"
+                    f"</div>", unsafe_allow_html=True)
+
+        poc = of_sig.get("poc",0); vah = of_sig.get("vah",0); val = of_sig.get("val",0)
+        vwap = of_sig.get("vwap",0)
+        for lbl, val_v, col in [("POC", poc, "#ffa500"),("VAH",vah,"#00d4aa"),("VAL",val,"#ff4b4b"),("VWAP",vwap,"#60a5fa")]:
+            if val_v:
+                st.markdown(f"<div style='display:flex;justify-content:space-between;padding:0.25rem 0.5rem;"
+                            f"background:#1e2130;border-radius:6px;margin-bottom:3px;'>"
+                            f"<span style='color:#888;font-size:0.85rem;'>{lbl}</span>"
+                            f"<b style='color:{col};'>${val_v:.2f}</b></div>",
+                            unsafe_allow_html=True)
+
+    with cc2:
+        st.markdown("**Order Blocks & FVGs**")
+        ob_t = of_sig.get("ob_type",""); ob_l = of_sig.get("ob_level",0)
+        fvg_t = of_sig.get("fvg_type",""); fvg_top = of_sig.get("fvg_top",0); fvg_bot = of_sig.get("fvg_bot",0)
+
+        ob_c = "#00d4aa" if ob_t=="BULLISH" else ("#ff4b4b" if ob_t=="BEARISH" else "#888")
+        st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.5rem;'>"
+                    f"<span style='color:#888;font-size:0.8rem;'>Order Block</span><br>"
+                    f"<b style='color:{ob_c};'>{ob_t or 'None near price'}</b>"
+                    f"{'<br><span style="color:#888;font-size:0.8rem;">@ $' + str(round(ob_l,2)) + '</span>' if ob_l else ''}"
+                    f"</div>", unsafe_allow_html=True)
+
+        fvg_c = "#00d4aa" if fvg_t=="BULLISH" else ("#ff4b4b" if fvg_t=="BEARISH" else "#888")
+        st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.7rem 1rem;'>"
+                    f"<span style='color:#888;font-size:0.8rem;'>Fair Value Gap</span><br>"
+                    f"<b style='color:{fvg_c};'>{fvg_t or 'None filling'}</b>"
+                    f"{'<br><span style="color:#888;font-size:0.8rem;">[$' + str(round(fvg_bot,2)) + ' – $' + str(round(fvg_top,2)) + ']</span>' if fvg_top else ''}"
+                    f"</div>", unsafe_allow_html=True)
+
+        liq_swept = of_sig.get("liq_swept", False)
+        liq_lvl   = of_sig.get("liq_level", 0)
+        if liq_swept:
+            st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.5rem 1rem;border:1px solid #fbbf24;margin-top:0.5rem;'>"
+                        f"<span style='color:#fbbf24;font-weight:bold;'>⚡ Liquidity swept @ ${liq_lvl:.2f}</span>"
+                        f"</div>", unsafe_allow_html=True)
+
+    with cc3:
+        st.markdown("**Tape Reading**")
+        tape_col = {"STRONGLY_BULLISH":"#00d4aa","BULLISH":"#4ade80",
+                    "STRONGLY_BEARISH":"#ff4b4b","BEARISH":"#f87171"}.get(tape_bias,"#888")
+        buy_pct = of_sig.get("confidence",0.5) * 100   # placeholder
+
+        st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.5rem;'>"
+                    f"<span style='color:#888;font-size:0.8rem;'>Tape Bias</span><br>"
+                    f"<b style='color:{tape_col};font-size:1.1rem;'>{tape_bias}</b>"
+                    f"</div>", unsafe_allow_html=True)
+
+        cvd_bias = of_sig.get("cvd_bias","")
+        cvd_c = "#00d4aa" if "BULL" in cvd_bias else ("#ff4b4b" if "BEAR" in cvd_bias else "#888")
+        st.markdown(f"<div style='background:#1e2130;border-radius:8px;padding:0.7rem 1rem;'>"
+                    f"<span style='color:#888;font-size:0.8rem;'>CVD / Delta</span><br>"
+                    f"<b style='color:{cvd_c};'>{cvd_bias or 'NEUTRAL'}</b>"
+                    f"</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ══ SECTION 4: WHY THIS SIGNAL ═══════════════════════════════════════════
+    st.markdown("### Why This Signal — Score Breakdown")
+
+    if reasons:
+        # Show as colored badges
+        badges_html = ""
+        for r in reasons:
+            r_low = r.lower()
+            if any(k in r_low for k in ["ob","order block"]): bg="#7c3aed"
+            elif any(k in r_low for k in ["fvg","fair value"]): bg="#0369a1"
+            elif any(k in r_low for k in ["liquidity","liq","sweep","eqh","eql"]): bg="#b45309"
+            elif any(k in r_low for k in ["ote","optimal trade"]): bg="#065f46"
+            elif any(k in r_low for k in ["tape","cvd","delta","absorb","climax"]): bg="#831843"
+            elif any(k in r_low for k in ["killzone","london","ny am","silver bullet","asian"]): bg="#1e3a5f"
+            elif any(k in r_low for k in ["vwap"]): bg="#1a3a1a"
+            elif any(k in r_low for k in ["poc","vah","val","volume profile","discount","premium"]): bg="#3a2a0a"
+            elif any(k in r_low for k in ["bos","choch","bias","structure"]): bg="#2a1a3a"
+            else: bg="#1e2130"
+            badges_html += (f"<span style='display:inline-block;background:{bg};color:white;"
+                            f"border-radius:20px;padding:4px 12px;margin:3px;font-size:0.82rem;"
+                            f"border:1px solid rgba(255,255,255,0.1);'>{r}</span>")
+        st.markdown(f"<div style='line-height:2;'>{badges_html}</div>", unsafe_allow_html=True)
     else:
-        action   = of_sig.get("action", "WAIT")
-        strength = of_sig.get("strength", "WAIT")
-        score    = of_sig.get("score", 0)
-        conf     = of_sig.get("confidence", 0)
-        entry    = of_sig.get("entry", 0)
-        sl       = of_sig.get("stop_loss", 0)
-        tp1      = of_sig.get("target1", 0)
-        tp2      = of_sig.get("target2", 0)
-        tp3      = of_sig.get("target3", 0)
-        rr       = of_sig.get("risk_reward", 0)
-        ts       = of_sig.get("timestamp", "")[:19].replace("T"," ")
+        st.caption("No active confluence — waiting for setup.")
 
-        # ── Main signal card ───────────────────────────────────────────────────
-        act_col = {"BUY": "#00d4aa", "SELL": "#ff4b4b"}.get(action, "#ffa500")
-        act_emoji = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⏳"}.get(action, "⏳")
-        st.markdown(
-            f"<div style='background:#1e2130;border-radius:12px;padding:1.5rem 2rem;"
-            f"border-left:6px solid {act_col};margin-bottom:1rem;'>"
-            f"<h1 style='color:{act_col};margin:0;'>{act_emoji} {action} {strength}</h1>"
-            f"<p style='color:#aaa;margin:0.3rem 0 0;font-size:1rem;'>"
-            f"Score: <b style='color:white;'>{score}/20</b> ({conf:.0%} confidence) | "
-            f"Killzone: <b>{of_sig.get('killzone') or 'none'}</b> | "
-            f"HTF: <b>{of_sig.get('htf_bias','')}</b> | "
-            f"Updated: {ts}</p></div>",
-            unsafe_allow_html=True,
-        )
+    st.divider()
 
-        # ── Entry/SL/TP metrics ────────────────────────────────────────────────
-        if action in ("BUY","SELL"):
-            risk = abs(entry - sl)
-            m1,m2,m3,m4,m5,m6 = st.columns(6)
-            m1.metric("Entry",  f"${entry:.2f}")
-            m2.metric("Stop Loss", f"${sl:.2f}",    delta=f"-{risk:.2f}" if action=="BUY" else f"+{risk:.2f}",  delta_color="inverse")
-            m3.metric("TP1 (1.5R)", f"${tp1:.2f}", delta=f"+{abs(tp1-entry):.2f}" if action=="BUY" else f"-{abs(tp1-entry):.2f}")
-            m4.metric("TP2 (2.5R)", f"${tp2:.2f}", delta=f"+{abs(tp2-entry):.2f}" if action=="BUY" else f"-{abs(tp2-entry):.2f}")
-            m5.metric("TP3 (4R)",   f"${tp3:.2f}", delta=f"+{abs(tp3-entry):.2f}" if action=="BUY" else f"-{abs(tp3-entry):.2f}")
-            m6.metric("R:R",    f"1:{rr:.1f}")
+    # ══ SECTION 5: LIVE TAPE FEED ════════════════════════════════════════════
+    st.markdown("### Live Tape Feed")
 
-        # ── Score bar ─────────────────────────────────────────────────────────
-        st.progress(score / 20, text=f"Signal Strength: {score}/20 (need ≥11 for trade, ≥14 for STRONG)")
+    @st.cache_data(ttl=60)
+    def _fetch_tape_data():
+        try:
+            from xauusd.of_strategy import _fetch
+            from xauusd.tape_reader import analyze_tape
+            df5 = _fetch("5m","3d")
+            tape_res = analyze_tape(df5)
+            return tape_res, df5
+        except Exception as _e:
+            return {"error": str(_e), "tape_events":[]}, None
 
-        st.markdown("---")
+    tape_res, df5_data = _fetch_tape_data()
 
-        # ── Context grid ──────────────────────────────────────────────────────
-        st.markdown("### 📊 Market Context")
-        cx1, cx2, cx3, cx4 = st.columns(4)
+    if "error" in tape_res:
+        st.warning(f"Tape: {tape_res['error']}")
+    else:
+        # Tape stat row
+        tp1c, tp2c, tp3c, tp4c, tp5c = st.columns(5)
+        tbias = tape_res.get("tape_bias","NEUTRAL")
+        tbias_col = {"STRONGLY_BULLISH":"#00d4aa","BULLISH":"#4ade80","NEUTRAL":"#888",
+                     "BEARISH":"#f87171","STRONGLY_BEARISH":"#ff4b4b"}.get(tbias,"#888")
+        tp1c.metric("Tape Bias", tbias)
+        tp2c.metric("Buy Pressure", f"{tape_res.get('buy_pressure',50):.0f}%")
+        tp3c.metric("Delta 5-bar", f"{tape_res.get('delta_5m',0):+.0f}")
+        tp4c.metric("Speed", tape_res.get("tape_speed","—"))
+        tp5c.metric("Price", f"${tape_res.get('last_price',0):,.2f}")
 
-        with cx1:
-            st.markdown("**Structure**")
-            struct = of_sig.get("structure","")
-            s_col  = "#00d4aa" if "UP" in struct else ("#ff4b4b" if "DOWN" in struct else "#ffa500")
-            st.markdown(f"<span style='color:{s_col};font-size:1.2rem;font-weight:bold;'>{struct or 'Unclear'}</span>", unsafe_allow_html=True)
-            st.caption(f"4H HTF Bias: {of_sig.get('htf_bias','')}")
+        # Events feed
+        events = tape_res.get("tape_events",[])
+        if events:
+            st.markdown("**Recent Tape Events:**")
+            for ev in events:
+                ev_col = "#00d4aa" if any(k in ev.upper() for k in ["BULL","BUY","ABSORB"]) else "#ff4b4b"
+                st.markdown(f"<div style='background:#1e2130;border-radius:6px;padding:0.4rem 0.8rem;"
+                            f"margin-bottom:4px;border-left:3px solid {ev_col};font-size:0.85rem;'>"
+                            f"{ev}</div>", unsafe_allow_html=True)
 
-        with cx2:
-            st.markdown("**Volume Profile**")
-            poc = of_sig.get("poc",0); vah = of_sig.get("vah",0); val = of_sig.get("val",0)
-            if poc:
-                st.metric("POC", f"${poc:.2f}")
-                vp1, vp2 = st.columns(2)
-                vp1.metric("VAH", f"${vah:.2f}")
-                vp2.metric("VAL", f"${val:.2f}")
-            else:
-                st.info("VP pending")
-
-        with cx3:
-            st.markdown("**Order Block**")
-            ob_t = of_sig.get("ob_type",""); ob_l = of_sig.get("ob_level",0)
-            ob_col = "#00d4aa" if ob_t=="BULLISH" else ("#ff4b4b" if ob_t=="BEARISH" else "#888")
-            st.markdown(f"<span style='color:{ob_col};font-weight:bold;'>{ob_t or 'None near price'}</span>", unsafe_allow_html=True)
-            if ob_l: st.caption(f"@ ${ob_l:.2f}")
-            st.markdown("**FVG**")
-            fvg_t = of_sig.get("fvg_type",""); fvg_top = of_sig.get("fvg_top",0); fvg_bot = of_sig.get("fvg_bot",0)
-            if fvg_t:
-                fvg_col = "#00d4aa" if fvg_t=="BULLISH" else "#ff4b4b"
-                st.markdown(f"<span style='color:{fvg_col};'>{fvg_t} [{fvg_bot:.2f}-{fvg_top:.2f}]</span>", unsafe_allow_html=True)
-            else:
-                st.caption("No FVG at price")
-
-        with cx4:
-            st.markdown("**CVD + VWAP**")
-            cvd = of_sig.get("cvd_bias",""); vwap = of_sig.get("vwap",0)
-            cvd_col = "#00d4aa" if "BULL" in cvd else ("#ff4b4b" if "BEAR" in cvd else "#ffa500")
-            st.markdown(f"CVD: <span style='color:{cvd_col};font-weight:bold;'>{cvd or 'NEUTRAL'}</span>", unsafe_allow_html=True)
-            if vwap: st.metric("VWAP", f"${vwap:.2f}", delta=f"${entry-vwap:+.2f}" if entry else None)
-            if of_sig.get("liq_swept"):
-                st.markdown(f"<span style='color:#fbbf24;font-weight:bold;'>Liquidity swept @ ${of_sig.get('liq_level',0):.2f}</span>", unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # ── Reasons breakdown ──────────────────────────────────────────────────
-        st.markdown("### 🧠 Why This Signal")
-        reasons = of_sig.get("reasons", [])
-        if reasons:
-            for r in reasons:
-                st.markdown(f"- {r}")
-        else:
-            st.caption("No reasons recorded")
-
-        st.markdown("---")
-
-        # ── Live volume profile chart ──────────────────────────────────────────
-        st.markdown("### 📈 Live Chart — VP + VWAP Overlay")
-
-        @st.cache_data(ttl=300)
-        def fetch_of_chart():
-            try:
-                from xauusd.of_strategy import _fetch, compute_vwap, compute_volume_profile
-                df = _fetch("15m","3d")
-                vp_data  = compute_volume_profile(df.tail(100))
-                vwap_d   = compute_vwap(df)
-                return df, vp_data, vwap_d
-            except Exception as _e:
-                return None, {}, {}
-
-        df_chart, vp_data, vwap_data = fetch_of_chart()
-
-        if df_chart is not None and not df_chart.empty:
-            fig_of = go.Figure()
-            # Candlestick
-            tail_df = df_chart.tail(80)
-            fig_of.add_trace(go.Candlestick(
-                x=tail_df["timestamp"], open=tail_df["open"], high=tail_df["high"],
-                low=tail_df["low"], close=tail_df["close"],
-                name="XAUUSD 15m", increasing_line_color="#00d4aa", decreasing_line_color="#ff4b4b",
+        # Delta per bar chart
+        ts_list   = tape_res.get("timestamps",[])
+        delta_list= tape_res.get("delta_series",[])
+        if ts_list and delta_list:
+            fig_tape = go.Figure()
+            colors_d = ["#00d4aa" if d >= 0 else "#ff4b4b" for d in delta_list]
+            fig_tape.add_trace(go.Bar(
+                x=ts_list, y=delta_list, name="Delta per bar",
+                marker_color=colors_d,
             ))
-            # VWAP lines
-            vwap_now = vwap_data.get("vwap", 0)
-            if vwap_now:
-                for label, val, color, dash in [
-                    ("VWAP",    vwap_data.get("vwap",0),        "#ffa500", "solid"),
-                    ("VWAP+1σ", vwap_data.get("vwap_upper1",0), "#4ade80", "dash"),
-                    ("VWAP-1σ", vwap_data.get("vwap_lower1",0), "#4ade80", "dash"),
-                    ("VWAP+2σ", vwap_data.get("vwap_upper2",0), "#f87171", "dot"),
-                    ("VWAP-2σ", vwap_data.get("vwap_lower2",0), "#f87171", "dot"),
-                ]:
-                    if val:
-                        fig_of.add_hline(y=val, line_color=color, line_dash=dash,
-                                         line_width=1,
-                                         annotation_text=f"{label} {val:.0f}",
-                                         annotation_position="right")
-            # Volume profile levels
-            for label, val, color in [
-                ("POC", vp_data.get("poc",0), "#ffa500"),
-                ("VAH", vp_data.get("vah",0), "#00d4aa"),
-                ("VAL", vp_data.get("val",0), "#ff4b4b"),
-            ]:
-                if val:
-                    fig_of.add_hline(y=val, line_color=color, line_dash="longdash",
-                                     line_width=2,
-                                     annotation_text=f"{label} {val:.0f}",
-                                     annotation_position="left")
-            # OB zone box
-            ob_top = 0; ob_bot = 0
-            if of_sig.get("ob_level") and of_sig.get("ob_type"):
-                atr_v = of_sig.get("atr", 10)
-                ob_mid = of_sig.get("ob_level",0)
-                ob_top = ob_mid + atr_v * 0.3
-                ob_bot = ob_mid - atr_v * 0.3
-                fig_of.add_hrect(
-                    y0=ob_bot, y1=ob_top,
-                    fillcolor="rgba(0,212,170,0.1)" if of_sig.get("ob_type")=="BULLISH" else "rgba(255,75,75,0.1)",
-                    line_width=0,
-                    annotation_text=f"{of_sig.get('ob_type','')} OB",
-                )
-            # FVG zone box
-            if of_sig.get("fvg_top") and of_sig.get("fvg_bot"):
-                fig_of.add_hrect(
-                    y0=of_sig.get("fvg_bot",0), y1=of_sig.get("fvg_top",0),
-                    fillcolor="rgba(251,191,36,0.1)", line_color="rgba(251,191,36,0.3)", line_width=1,
-                    annotation_text="FVG",
-                )
-            # Entry/SL/TP lines
-            if action in ("BUY","SELL"):
-                fig_of.add_hline(y=entry, line_color="#ffffff", line_dash="dash", line_width=1,
-                                 annotation_text=f"Entry {entry:.2f}")
-                fig_of.add_hline(y=sl, line_color="#ff4b4b", line_dash="dash", line_width=1,
-                                 annotation_text=f"SL {sl:.2f}", annotation_position="bottom right")
-                fig_of.add_hline(y=tp1, line_color="#4ade80", line_dash="dot", line_width=1,
-                                 annotation_text=f"TP1 {tp1:.2f}", annotation_position="top right")
-                fig_of.add_hline(y=tp2, line_color="#00d4aa", line_dash="dot", line_width=1,
-                                 annotation_text=f"TP2 {tp2:.2f}", annotation_position="top right")
-
-            fig_of.update_layout(
-                title=f"XAUUSD 15m — Order Flow Strategy | {action} {strength}",
-                height=500, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                font_color="white", xaxis_rangeslider_visible=False,
-                margin=dict(t=50, b=20, l=60, r=100),
-                legend=dict(orientation="h", y=1.05),
+            fig_tape.add_hline(y=0, line_color="#555", line_width=1)
+            fig_tape.update_layout(
+                title="Buy–Sell Delta per 5m Bar (green=buyers won, red=sellers won)",
+                height=200, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                font_color="white", margin=dict(t=35,b=10),
+                showlegend=False,
             )
-            st.plotly_chart(fig_of, use_container_width=True)
+            st.plotly_chart(fig_tape, use_container_width=True)
 
-        # ── OF Trade History ───────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("### 📋 OF Signal History")
+    st.divider()
 
-        @st.cache_data(ttl=30)
-        def load_of_history():
-            try:
-                p = Path(__file__).parent.parent / "data" / "xauusd_of_trades.json"
-                if p.exists():
-                    return json.loads(p.read_text())
-            except Exception:
-                pass
-            return []
+    # ══ SECTION 6: LIVE CHART (VWAP + VP + Levels) ═══════════════════════════
+    st.markdown("### Chart — VWAP · Volume Profile · OB/FVG · Trade Levels")
 
-        of_hist = load_of_history()
-        if of_hist:
-            rows_of = []
-            for h in reversed(of_hist[-50:]):
-                rows_of.append({
-                    "Time":     (h.get("timestamp","") or "")[:16].replace("T"," "),
-                    "Action":   h.get("action",""),
-                    "Strength": h.get("strength",""),
-                    "Score":    f"{h.get('score',0)}/20",
-                    "Entry":    f"${h.get('entry',0):.2f}",
-                    "SL":       f"${h.get('stop_loss',0):.2f}",
-                    "TP1":      f"${h.get('target1',0):.2f}",
-                    "HTF":      h.get("htf_bias",""),
-                    "KZ":       h.get("killzone",""),
-                })
-            df_of_h = pd.DataFrame(rows_of)
+    @st.cache_data(ttl=180)
+    def _fetch_of_chart():
+        try:
+            from xauusd.of_strategy import _fetch, compute_vwap, compute_volume_profile
+            df = _fetch("15m","3d")
+            vp_d  = compute_volume_profile(df.tail(96))
+            vwap_d= compute_vwap(df)
+            return df, vp_d, vwap_d
+        except Exception as _e:
+            return None, {}, {}
 
-            def style_of_action(val):
-                if val=="BUY":  return "color:#00d4aa;font-weight:bold"
-                if val=="SELL": return "color:#ff4b4b;font-weight:bold"
-                return "color:#ffa500"
+    df_oc, vp_oc, vwap_oc = _fetch_of_chart()
 
+    if df_oc is not None and not df_oc.empty:
+        tail = df_oc.tail(80)
+        fig_c = go.Figure()
+
+        # Candlestick
+        fig_c.add_trace(go.Candlestick(
+            x=tail["timestamp"], open=tail["open"], high=tail["high"],
+            low=tail["low"],  close=tail["close"], name="XAUUSD 15m",
+            increasing_line_color="#00d4aa", decreasing_line_color="#ff4b4b",
+            increasing_fillcolor="#00d4aa", decreasing_fillcolor="#ff4b4b",
+        ))
+
+        # VWAP bands
+        for lbl, val_v, col, dash in [
+            ("VWAP",     vwap_oc.get("vwap",0),         "#ffa500", "solid"),
+            ("+1σ",      vwap_oc.get("vwap_upper1",0),  "#60a5fa", "dash"),
+            ("-1σ",      vwap_oc.get("vwap_lower1",0),  "#60a5fa", "dash"),
+            ("+2σ",      vwap_oc.get("vwap_upper2",0),  "#f87171", "dot"),
+            ("-2σ",      vwap_oc.get("vwap_lower2",0),  "#4ade80", "dot"),
+        ]:
+            if val_v:
+                fig_c.add_hline(y=val_v, line_color=col, line_dash=dash, line_width=1,
+                                annotation_text=f"{lbl} {val_v:.0f}", annotation_font_size=10,
+                                annotation_position="right")
+
+        # VP levels
+        for lbl, val_v, col in [
+            ("POC", vp_oc.get("poc",0), "#ffa500"),
+            ("VAH", vp_oc.get("vah",0), "#00d4aa"),
+            ("VAL", vp_oc.get("val",0), "#ff4b4b"),
+        ]:
+            if val_v:
+                fig_c.add_hline(y=val_v, line_color=col, line_dash="longdash", line_width=2,
+                                annotation_text=f"{lbl} {val_v:.0f}", annotation_font_size=11,
+                                annotation_position="left")
+
+        # OB zone
+        if of_sig.get("ob_level") and of_sig.get("ob_type"):
+            atr_v  = of_sig.get("atr",10)
+            ob_mid = of_sig.get("ob_level",0)
+            ob_c2  = "rgba(0,212,170,0.12)" if of_sig.get("ob_type")=="BULLISH" else "rgba(255,75,75,0.12)"
+            fig_c.add_hrect(y0=ob_mid-atr_v*0.35, y1=ob_mid+atr_v*0.35,
+                            fillcolor=ob_c2, line_width=0,
+                            annotation_text=f"{of_sig['ob_type']} OB", annotation_font_size=10)
+
+        # FVG zone
+        if of_sig.get("fvg_top") and of_sig.get("fvg_bot"):
+            fig_c.add_hrect(y0=of_sig["fvg_bot"], y1=of_sig["fvg_top"],
+                            fillcolor="rgba(251,191,36,0.12)",
+                            line_color="rgba(251,191,36,0.4)", line_width=1,
+                            annotation_text="FVG", annotation_font_size=10)
+
+        # Trade levels
+        if action in ("BUY","SELL"):
+            for lbl, pv, col, dash in [
+                ("Entry",  entry, "#ffffff", "dash"),
+                ("SL",     sl,    "#ff4b4b", "dot"),
+                ("TP1",    tp1,   "#4ade80", "dot"),
+                ("TP2",    tp2,   "#00d4aa", "dot"),
+            ]:
+                if pv:
+                    fig_c.add_hline(y=pv, line_color=col, line_dash=dash, line_width=1.5,
+                                    annotation_text=f"{lbl} {pv:.2f}",
+                                    annotation_position="bottom right" if lbl=="SL" else "top right",
+                                    annotation_font_size=11)
+
+        fig_c.update_layout(
+            height=520, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            font_color="white", xaxis_rangeslider_visible=False,
+            title=f"XAUUSD 15m — {action} {strength} | Score {score}/{max_sc}",
+            margin=dict(t=45,b=15,l=50,r=110),
+        )
+        fig_c.update_xaxis(showgrid=False)
+        fig_c.update_yaxis(showgrid=True, gridcolor="#1e2130")
+        st.plotly_chart(fig_c, use_container_width=True)
+
+    st.divider()
+
+    # ══ SECTION 7: SELF-LEARNING PERFORMANCE ═════════════════════════════════
+    st.markdown("### Self-Learning — Factor Performance")
+    st.caption("The model learns from every trade — winning factors gain weight, losing factors are reduced.")
+
+    try:
+        from xauusd.score_learner import get_factor_performance, summary as learner_summary
+        ls = learner_summary()
+        ll1,ll2,ll3,ll4 = st.columns(4)
+        ll1.metric("Factors Tracked",   ls.get("factors_tracked",0))
+        ll2.metric("Factors Adjusted",  ls.get("factors_adjusted",0))
+        ll3.metric("Last Updated",      (ls.get("last_updated","never") or "")[:10])
+        ll4.metric("Avg Trades/Factor", ls.get("total_trades_recorded",0))
+
+        perf = get_factor_performance()
+        if perf:
+            df_perf = pd.DataFrame(perf)
+            def style_wr(val):
+                try:
+                    v = float(str(val).rstrip("%"))
+                    if v >= 65: return "color:#00d4aa;font-weight:bold"
+                    if v <= 40: return "color:#ff4b4b;font-weight:bold"
+                    return "color:#ffa500"
+                except: return ""
             st.dataframe(
-                df_of_h.style.map(style_of_action, subset=["Action"]),
+                df_perf.style.map(style_wr, subset=["Win Rate"]),
                 use_container_width=True, hide_index=True,
             )
         else:
-            st.info("No OF signal history yet. Start the engine: `python3 xauusd/of_engine.py`")
+            st.info("No factor data yet — trades will be logged automatically as signals fire and SL/TP is hit.")
+    except Exception as _e:
+        st.caption(f"Learner: {_e}")
 
-        # ── Strategy explanation ───────────────────────────────────────────────
-        with st.expander("📖 How This Strategy Works"):
-            st.markdown("""
-**Score Breakdown (20 pts total)**
+    st.divider()
 
-| Layer | Max Pts | What it checks |
+    # ══ SECTION 8: OF HISTORY ════════════════════════════════════════════════
+    st.markdown("### Signal History")
+
+    @st.cache_data(ttl=30)
+    def _load_of_hist():
+        try:
+            p = Path(__file__).parent.parent / "data" / "xauusd_of_trades.json"
+            if p.exists():
+                return json.loads(p.read_text())
+        except Exception:
+            pass
+        return []
+
+    of_hist = _load_of_hist()
+    if of_hist:
+        rows_ofh = []
+        for h in reversed(of_hist[-30:]):
+            action_h = h.get("action","")
+            rows_ofh.append({
+                "Time":     (h.get("timestamp","") or "")[:16].replace("T"," "),
+                "Signal":   action_h,
+                "Strength": h.get("strength",""),
+                "Score":    f"{h.get('score',0)}/{h.get('max_score',40)}",
+                "Entry":    f"${h.get('entry',0):.2f}" if h.get("entry") else "—",
+                "HTF":      h.get("htf_bias",""),
+                "Killzone": h.get("killzone","") or "—",
+                "Reasons":  " · ".join((h.get("reasons") or [])[:2]),
+            })
+        df_ofh = pd.DataFrame(rows_ofh)
+        def _style_sig(v):
+            if v=="BUY":  return "color:#00d4aa;font-weight:bold"
+            if v=="SELL": return "color:#ff4b4b;font-weight:bold"
+            return "color:#ffa500"
+        st.dataframe(
+            df_ofh.style.map(_style_sig, subset=["Signal"]),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("No history yet — start the engine for continuous logging.")
+
+    # ══ SECTION 9: QUICK REFERENCE ═══════════════════════════════════════════
+    with st.expander("Quick Reference — Score Layers"):
+        st.markdown("""
+| Layer | Pts | When it fires |
 |---|---|---|
-| HTF Structure (4H) | 4 | BOS/CHoCH direction + EMA21/55 stack on 4H |
-| Order Block (1H + 15m) | 3 | Price tapping 1H OB + 15m OB confluence |
-| Fair Value Gap (15m + 1H) | 3 | Unmitigated FVG being filled at entry |
-| Liquidity Sweep | 2 | Stop hunt before the real move (bear/bull trap) |
-| CVD Divergence | 2 | Price vs cumulative buying/selling pressure |
-| Volume Profile | 2 | Price at POC, VAH, or VAL (key VP levels) |
-| Killzone Timing | 2 | London (07-10 UTC) or NY (13-16 UTC) active |
-| VWAP Position | 2 | Price above/below VWAP + 2σ extremes |
+| 4H HTF Bias | 0-5 | 4H trend + EMA stack + 4H/1H BOS aligned |
+| Order Block | 0-4 | Price tapping 4H/1H/15m OB in trade direction |
+| Fair Value Gap | 0-4 | Unmitigated FVG being filled + HTF FVG + Inversion FVG |
+| Liquidity Sweep | 0-3 | EQH/EQL swept (bull/bear trap) + multi-TF sweep |
+| OTE Zone | 0-3 | Price in 61.8–70.5% retracement of last swing |
+| CVD Divergence | 0-3 | Price up but sellers absorbing (or vice versa) |
+| Tape Bias | 0-3 | Strongly bullish/bearish tape + climax/absorption |
+| Premium/Discount | 0-2 | Buy in discount (<50% of 4H range), sell in premium |
+| Volume Profile | 0-3 | At POC, VAH, or VAL |
+| Killzone | 0-3 | NY Silver Bullet > London KZ > NY AM > Asian |
+| VWAP | 0-3 | At ±2σ (extreme) or ±1σ + direction aligned |
+| Displacement | 0-2 | Large body candle preceding entry |
+| Prev Day/Week H/L | 0-2 | Price at PDH/PDL or PWH/PWL |
 
-**Entry Criteria:** Score ≥ 11/20
-**Strong Signal:** Score ≥ 14/20
-
-**ICT Killzones:**
-- Asian Range 00:00-07:00 UTC — price consolidates, forms liquidity above/below
-- London Killzone 07:00-10:00 UTC — first major expansion, sweep + reverse
-- NY AM 13:30-16:00 UTC — continuation or reversal of London move
-- NY Silver Bullet 15:00-16:00 UTC — 60-min precision window
-
-**SL Placement:**
-- Below Bullish OB bottom -0.3×ATR (BUY)
-- Above Bearish OB top +0.3×ATR (SELL)
-- Fallback: 1.5×ATR from entry
-
-**TP Levels:**
-- TP1: 1.5×Risk (take 50%, move SL to BE)
-- TP2: 2.5×Risk or next major level (VAH/VAL/POC)
-- TP3: 4×Risk or major structure level
-            """)
-
-
+**Trade fires:** ≥ 22/40 (55%) · **STRONG:** ≥ 28/40 (70%)
+**SL:** Below/above OB extreme ±0.3×ATR · **TP1:** 1.5R · **TP2:** 2.5R or key level · **TP3:** 4R
+""")

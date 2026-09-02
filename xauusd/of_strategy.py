@@ -73,15 +73,22 @@ MP_AVAILABLE = False   # Use manual histogram VP (reliable across all data shape
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-SCORE_BUY_THRESHOLD   = 11
-SCORE_STRONG_THRESHOLD= 14
-SWING_LENGTH          = 10      # bars for swing high/low detection
+SCORE_BUY_THRESHOLD   = 22     # out of 40
+SCORE_STRONG_THRESHOLD= 28
+SWING_LENGTH          = 10
 FVG_JOIN              = False
 OB_CLOSE_MIT          = False
-LIQ_RANGE_PCT         = 0.005   # 0.5% clustering for liquidity levels
+LIQ_RANGE_PCT         = 0.005
 ATR_PERIOD            = 14
-CVD_LOOKBACK          = 20      # bars for CVD divergence check
-VOL_PROFILE_BINS      = 100     # price buckets for volume profile
+CVD_LOOKBACK          = 20
+VOL_PROFILE_BINS      = 100
+
+# OTE (Optimal Trade Entry) Fibonacci levels
+OTE_DEEP   = 0.705   # 70.5% — ICT OTE zone
+OTE_SHALLOW= 0.618   # 61.8% — OTE start
+# Premium / Discount zone thresholds
+PREMIUM_ZONE = 0.50   # above midpoint of range = premium (sell)
+DISCOUNT_ZONE= 0.50   # below midpoint = discount (buy)
 
 # ICT Killzone windows (UTC hours)
 KILLZONES = {
@@ -575,109 +582,407 @@ def _score_direction(
     atr: float,
     smc_15m: dict,
     smc_1h: dict,
+    smc_4h: dict,
     smc_4h_struct: str,
     htf_bias: str,
     vp: dict,
     vwap_data: dict,
     cvd: dict,
+    tape: dict,
     killzone: str,
     asian_hi: float,
     asian_lo: float,
+    df_15m: pd.DataFrame = None,
+    df_1h: pd.DataFrame = None,
+    df_4h: pd.DataFrame = None,
 ) -> tuple[int, list[str]]:
-    """Score a single direction (BUY or SELL). Returns (score, reasons)."""
+    """Score a single direction (BUY/SELL). Returns (score, reasons). Max = 40 pts."""
     score   = 0
     reasons = []
     is_buy  = (direction == "BUY")
 
-    # ── 1. HTF Structure (0-4) ────────────────────────────────────────────────
+    df15  = df_15m if df_15m is not None else pd.DataFrame()
+    df1h  = df_1h  if df_1h  is not None else pd.DataFrame()
+    df4h  = df_4h  if df_4h  is not None else pd.DataFrame()
+
+    # ── 1. HTF Structure alignment (0-5) ──────────────────────────────────────
     if htf_bias == ("BULLISH" if is_buy else "BEARISH"):
         score += 3; reasons.append(f"4H bias {htf_bias}")
     elif htf_bias == "NEUTRAL":
         score += 1
-    # Recent 4H BOS in trade direction
     if ("BOS_UP" in smc_4h_struct and is_buy) or ("BOS_DOWN" in smc_4h_struct and not is_buy):
-        score += 1; reasons.append(f"4H {smc_4h_struct} confirms")
+        score += 1; reasons.append(f"4H {smc_4h_struct}")
+    # 1H structure alignment
+    struct_1h, _ = extract_last_bos_choch(smc_1h.get("bos_choch", pd.DataFrame()))
+    if ("UP" in struct_1h and is_buy) or ("DOWN" in struct_1h and not is_buy):
+        score += 1; reasons.append(f"1H {struct_1h} aligned")
 
-    # ── 2. Order Block (1H, 0-3) ──────────────────────────────────────────────
-    ob_1h = extract_nearest_ob(smc_1h.get("ob", pd.DataFrame()), price, direction)
-    if ob_1h["type"]:
+    # ── 2. Order Block (0-4) ──────────────────────────────────────────────────
+    ob_1h  = extract_nearest_ob(smc_1h.get("ob",  pd.DataFrame()), price, direction)
+    ob_15m = extract_nearest_ob(smc_15m.get("ob", pd.DataFrame()), price, direction)
+    ob_4h  = extract_nearest_ob(smc_4h.get("ob",  pd.DataFrame()), price, direction)
+    if ob_4h["type"]:
+        score += 2; reasons.append(f"4H {ob_4h['type']} OB @ {ob_4h['mid']:.2f}")
+    elif ob_1h["type"]:
         score += 2; reasons.append(f"1H {ob_1h['type']} OB @ {ob_1h['mid']:.2f}")
-        # Even better if OB on 15m also aligned
-        ob_15m = extract_nearest_ob(smc_15m.get("ob", pd.DataFrame()), price, direction)
-        if ob_15m["type"]:
-            score += 1; reasons.append(f"15m OB confluence @ {ob_15m['mid']:.2f}")
+    if ob_15m["type"]:
+        score += 1; reasons.append(f"15m OB confluence @ {ob_15m['mid']:.2f}")
+    if ob_4h["type"] and ob_1h["type"]:
+        score += 1; reasons.append("4H+1H OB stack — high confluence zone")
 
-    # ── 3. Fair Value Gap (0-3) ───────────────────────────────────────────────
+    # ── 3. Fair Value Gap (0-4) ───────────────────────────────────────────────
     fvg_15m = extract_nearest_fvg(smc_15m.get("fvg", pd.DataFrame()), price, direction)
+    fvg_1h  = extract_nearest_fvg(smc_1h.get("fvg",  pd.DataFrame()), price, direction)
     if fvg_15m["type"]:
-        score += 2; reasons.append(f"15m FVG fill ({fvg_15m['bot']:.2f}-{fvg_15m['top']:.2f})")
-        fvg_1h = extract_nearest_fvg(smc_1h.get("fvg", pd.DataFrame()), price, direction)
-        if fvg_1h["type"]:
-            score += 1; reasons.append("1H FVG confluence")
+        score += 2; reasons.append(f"15m FVG fill [{fvg_15m['bot']:.1f}-{fvg_15m['top']:.1f}]")
+    if fvg_1h["type"]:
+        score += 1; reasons.append(f"1H FVG confluence [{fvg_1h['bot']:.1f}-{fvg_1h['top']:.1f}]")
+    # HTF FVG (4H/1H)
+    htf_fvg = get_htf_fvg(smc_1h.get("fvg", pd.DataFrame()), smc_4h.get("fvg", pd.DataFrame()), price, atr)
+    if htf_fvg.get("type"):
+        right_dir = (htf_fvg["type"]=="BULLISH" and is_buy) or (htf_fvg["type"]=="BEARISH" and not is_buy)
+        if right_dir:
+            score += 1; reasons.append(f"{htf_fvg['tf']} FVG backing trade [{htf_fvg['bot']:.1f}-{htf_fvg['top']:.1f}]")
+    # Inversion FVG
+    if not df15.empty:
+        inv_fvg = get_inversion_fvg(smc_15m.get("fvg", pd.DataFrame()), price, df15)
+        if (inv_fvg["type"]=="INVERSION_SUPPORT" and is_buy) or (inv_fvg["type"]=="INVERSION_RESIST" and not is_buy):
+            score += 1; reasons.append(f"Inversion FVG acting as {'support' if is_buy else 'resistance'}")
 
-    # ── 4. Liquidity Sweep (0-2) ──────────────────────────────────────────────
-    swept_15m, liq_lvl = check_liquidity_swept(smc_15m.get("liquidity", pd.DataFrame()), price, direction)
-    swept_1h,  _       = check_liquidity_swept(smc_1h.get("liquidity", pd.DataFrame()), price, direction)
-    if swept_15m or swept_1h:
+    # ── 4. Liquidity sweep (0-3) ──────────────────────────────────────────────
+    swept_15m, liq_lvl_15 = check_liquidity_swept(smc_15m.get("liquidity", pd.DataFrame()), price, direction)
+    swept_1h,  liq_lvl_1h = check_liquidity_swept(smc_1h.get("liquidity",  pd.DataFrame()), price, direction)
+    liq_lvl = liq_lvl_15 or liq_lvl_1h
+    if swept_15m and swept_1h:
+        score += 3; reasons.append(f"Multi-TF liquidity sweep @ {liq_lvl:.2f} — strong reversal setup")
+    elif swept_15m or swept_1h:
         score += 2; reasons.append(f"Liquidity swept @ {liq_lvl:.2f}")
 
-    # ── 5. CVD (0-2) ──────────────────────────────────────────────────────────
+    # ── 5. Equal Highs / Lows (0-2) ───────────────────────────────────────────
+    if not df15.empty:
+        eqhl = detect_equal_highs_lows(df15)
+        if is_buy and eqhl.get("eql_swept") and eqhl["eql"] > 0:
+            score += 2; reasons.append(f"EQL {eqhl['eql']:.2f} swept — bear trap (bulls incoming)")
+        elif not is_buy and eqhl.get("eqh_swept") and eqhl["eqh"] > 0:
+            score += 2; reasons.append(f"EQH {eqhl['eqh']:.2f} swept — bull trap (bears incoming)")
+        elif is_buy and eqhl.get("eql") and abs(price - eqhl["eql"]) < atr * 0.5:
+            score += 1; reasons.append(f"EQL support @ {eqhl['eql']:.2f}")
+        elif not is_buy and eqhl.get("eqh") and abs(price - eqhl["eqh"]) < atr * 0.5:
+            score += 1; reasons.append(f"EQH resistance @ {eqhl['eqh']:.2f}")
+
+    # ── 6. OTE (Optimal Trade Entry) (0-3) ────────────────────────────────────
+    if not df15.empty:
+        sh, sl_sw = get_swing_range(smc_15m.get("swings", pd.DataFrame()), df15, lookback=30)
+        ote_lo, ote_hi = get_ote_zone(sh, sl_sw, direction)
+        if ote_lo and ote_hi and ote_lo <= price <= ote_hi:
+            score += 3; reasons.append(f"OTE zone [{ote_lo:.2f}-{ote_hi:.2f}] — ICT 61.8-70.5% retracement")
+        elif ote_lo and ote_hi and abs(price - (ote_lo + ote_hi) / 2) < atr * 0.5:
+            score += 1; reasons.append(f"Near OTE zone [{ote_lo:.2f}-{ote_hi:.2f}]")
+
+    # ── 7. Premium / Discount zone (0-2) ──────────────────────────────────────
+    if not df4h.empty:
+        sh4, sl4 = get_swing_range(smc_4h.get("swings", pd.DataFrame()), df4h, lookback=40)
+        pd_zone  = get_premium_discount(sh4, sl4, price)
+        if is_buy and pd_zone == "DISCOUNT":
+            score += 2; reasons.append(f"Price in DISCOUNT zone (below 50% of 4H range) — cheap")
+        elif not is_buy and pd_zone == "PREMIUM":
+            score += 2; reasons.append(f"Price in PREMIUM zone (above 50% of 4H range) — expensive")
+        elif pd_zone == "EQUILIBRIUM":
+            score += 1
+
+    # ── 8. Displacement confirmation (0-2) ───────────────────────────────────
+    if not df15.empty:
+        disp = detect_displacement(df15, atr)
+        if disp["displaced"]:
+            if (disp["direction"] == "UP" and is_buy) or (disp["direction"] == "DOWN" and not is_buy):
+                score += 2; reasons.append(f"Displacement candle {disp['direction']} — institutional delivery")
+            else:
+                score += 0  # against us — slight negative not penalised
+
+    # ── 9. Previous Day / Week levels (0-2) ──────────────────────────────────
+    if not df1h.empty:
+        prev = get_prev_day_levels(df1h)
+        tol  = atr * 0.5
+        if is_buy:
+            if prev["pdl"] and abs(price - prev["pdl"]) < tol:
+                score += 1; reasons.append(f"Previous Day Low {prev['pdl']:.2f} as support")
+            if prev["pwl"] and abs(price - prev["pwl"]) < tol:
+                score += 1; reasons.append(f"Previous Week Low {prev['pwl']:.2f} as support")
+        else:
+            if prev["pdh"] and abs(price - prev["pdh"]) < tol:
+                score += 1; reasons.append(f"Previous Day High {prev['pdh']:.2f} as resistance")
+            if prev["pwh"] and abs(price - prev["pwh"]) < tol:
+                score += 1; reasons.append(f"Previous Week High {prev['pwh']:.2f} as resistance")
+
+    # ── 10. CVD (0-3) ─────────────────────────────────────────────────────────
     cvd_bias = cvd.get("bias", "NEUTRAL")
     div_type = cvd.get("divergence_type", "")
     if cvd.get("divergence"):
-        if ("BULLISH_DIV" in div_type and is_buy):
-            score += 2; reasons.append("CVD bullish divergence (buyers absorbing)")
-        elif ("BEARISH_DIV" in div_type and not is_buy):
-            score += 2; reasons.append("CVD bearish divergence (sellers absorbing)")
+        if "BULLISH_DIV" in div_type and is_buy:
+            score += 3; reasons.append("CVD bullish divergence — buyers absorbing (BIG signal)")
+        elif "BEARISH_DIV" in div_type and not is_buy:
+            score += 3; reasons.append("CVD bearish divergence — sellers absorbing (BIG signal)")
     elif cvd_bias == ("BULLISH" if is_buy else "BEARISH"):
-        score += 1; reasons.append(f"CVD {cvd_bias}")
+        score += 1; reasons.append(f"CVD {cvd_bias} bias aligned")
 
-    # ── 6. Volume Profile (0-2) ───────────────────────────────────────────────
+    # ── 11. Tape bias (0-3) ──────────────────────────────────────────────────
+    tape_bias = tape.get("tape_bias", "NEUTRAL")
+    if tape_bias == ("STRONGLY_BULLISH" if is_buy else "STRONGLY_BEARISH"):
+        score += 3; reasons.append(f"Tape STRONGLY {'BULLISH' if is_buy else 'BEARISH'} — buyers/sellers dominating")
+    elif tape_bias == ("BULLISH" if is_buy else "BEARISH"):
+        score += 2; reasons.append(f"Tape {tape_bias} — aligned with direction")
+    if tape.get("climax") and tape.get("climax_type"):
+        if (tape["climax_type"]=="SELLING_CLIMAX" and is_buy) or (tape["climax_type"]=="BUYING_CLIMAX" and not is_buy):
+            score += 1; reasons.append(f"Tape: {tape['climax_type']} — exhaustion reversal")
+    if tape.get("absorption") and tape.get("absorption_side"):
+        if (tape["absorption_side"]=="BULL_ABSORB" and is_buy) or (tape["absorption_side"]=="BEAR_ABSORB" and not is_buy):
+            score += 1; reasons.append(f"Tape: {tape['absorption_side']} — institutions absorbing")
+
+    # ── 12. Volume Profile (0-3) ─────────────────────────────────────────────
     poc = vp.get("poc", 0); vah = vp.get("vah", 0); val = vp.get("val", 0)
     if poc:
-        dist_poc = abs(price - poc)
-        dist_vah = abs(price - vah)
-        dist_val = abs(price - val)
-        tol = atr * 0.3
-        if dist_poc < tol:
-            score += 1; reasons.append(f"Price at POC {poc:.2f}")
-        if is_buy and dist_val < tol:
-            score += 1; reasons.append(f"Price at VAL {val:.2f} (support)")
-        elif not is_buy and dist_vah < tol:
-            score += 1; reasons.append(f"Price at VAH {vah:.2f} (resistance)")
+        tol_vp = atr * 0.4
+        if abs(price - poc) < tol_vp:
+            score += 1; reasons.append(f"At POC {poc:.2f} — highest volume magnet")
+        if is_buy and val and abs(price - val) < tol_vp:
+            score += 2; reasons.append(f"At VAL {val:.2f} — 70% value area low support")
+        elif not is_buy and vah and abs(price - vah) < tol_vp:
+            score += 2; reasons.append(f"At VAH {vah:.2f} — 70% value area high resistance")
 
-    # ── 7. Killzone timing (0-2) ──────────────────────────────────────────────
-    if killzone in ("London KZ", "NY AM", "NY Silver Bullet"):
-        score += 2; reasons.append(f"In {killzone}")
+    # ── 13. Killzone timing (0-3) ────────────────────────────────────────────
+    if killzone == "NY Silver Bullet":
+        score += 3; reasons.append("NY Silver Bullet (15:00-16:00 UTC) — highest probability 60-min window")
+    elif killzone in ("London KZ", "NY AM"):
+        score += 2; reasons.append(f"In {killzone} — institutional trading window")
     elif killzone == "Asian Range":
-        # Fade Asian range extremes
         if asian_hi and asian_lo:
             near_hi = abs(price - asian_hi) < atr * 0.5
             near_lo = abs(price - asian_lo) < atr * 0.5
             if not is_buy and near_hi:
-                score += 1; reasons.append(f"Asian range high rejection {asian_hi:.2f}")
+                score += 1; reasons.append(f"Fading Asian range high {asian_hi:.2f}")
             if is_buy and near_lo:
-                score += 1; reasons.append(f"Asian range low bounce {asian_lo:.2f}")
+                score += 1; reasons.append(f"Bouncing Asian range low {asian_lo:.2f}")
 
-    # ── 8. VWAP Position (0-2) ───────────────────────────────────────────────
+    # ── 14. VWAP (0-3) ───────────────────────────────────────────────────────
     vwap = vwap_data.get("vwap", 0)
-    vu1  = vwap_data.get("vwap_upper1", 0)
-    vl1  = vwap_data.get("vwap_lower1", 0)
     vu2  = vwap_data.get("vwap_upper2", 0)
     vl2  = vwap_data.get("vwap_lower2", 0)
+    vu1  = vwap_data.get("vwap_upper1", 0)
+    vl1  = vwap_data.get("vwap_lower1", 0)
     if vwap:
         above = price > vwap
         if is_buy and above:
-            score += 1; reasons.append(f"Price above VWAP {vwap:.2f}")
+            score += 1; reasons.append(f"Above VWAP {vwap:.2f} — bulls in control")
         elif not is_buy and not above:
-            score += 1; reasons.append(f"Price below VWAP {vwap:.2f}")
-        # 2σ mean-reversion extreme
-        if is_buy and price < vl2:
-            score += 1; reasons.append(f"At VWAP -2σ {vl2:.2f} (oversold)")
-        elif not is_buy and price > vu2:
-            score += 1; reasons.append(f"At VWAP +2σ {vu2:.2f} (overbought)")
+            score += 1; reasons.append(f"Below VWAP {vwap:.2f} — bears in control")
+        if is_buy and vl2 and price < vl2:
+            score += 2; reasons.append(f"At VWAP -2σ {vl2:.2f} — statistically oversold, mean reversion")
+        elif not is_buy and vu2 and price > vu2:
+            score += 2; reasons.append(f"At VWAP +2σ {vu2:.2f} — statistically overbought, mean reversion")
+        elif is_buy and vl1 and price < vl1:
+            score += 1; reasons.append(f"At VWAP -1σ {vl1:.2f} — value buy zone")
+        elif not is_buy and vu1 and price > vu1:
+            score += 1; reasons.append(f"At VWAP +1σ {vu1:.2f} — value sell zone")
 
     return score, reasons
+
+
+# ── Advanced SMC Helpers ───────────────────────────────────────────────────────
+
+def get_ote_zone(swing_high: float, swing_low: float, direction: str) -> tuple[float, float]:
+    """
+    Optimal Trade Entry zone (ICT): 61.8%-70.5% Fibonacci retracement.
+    BUY: pullback into 61.8-70.5% of the bullish swing
+    SELL: pullback into 61.8-70.5% of the bearish swing
+    """
+    if swing_high <= swing_low:
+        return 0.0, 0.0
+    rng = swing_high - swing_low
+    if direction == "BUY":
+        # Retracement of bullish swing: price pulls back to 61.8-70.5% from top
+        ote_hi = swing_high - rng * OTE_SHALLOW
+        ote_lo = swing_high - rng * OTE_DEEP
+    else:
+        # Retracement of bearish swing: price bounces to 61.8-70.5% from bottom
+        ote_lo = swing_low + rng * OTE_SHALLOW
+        ote_hi = swing_low + rng * OTE_DEEP
+    return round(ote_lo, 2), round(ote_hi, 2)
+
+
+def get_premium_discount(swing_high: float, swing_low: float, price: float) -> str:
+    """
+    Premium zone (above 50% of range) = expensive = SELL
+    Discount zone (below 50% of range) = cheap = BUY
+    Equilibrium (45-55%) = neutral
+    """
+    if swing_high <= swing_low:
+        return "NEUTRAL"
+    mid = (swing_high + swing_low) / 2
+    pct = (price - swing_low) / (swing_high - swing_low)
+    if pct > 0.55:   return "PREMIUM"
+    elif pct < 0.45: return "DISCOUNT"
+    return "EQUILIBRIUM"
+
+
+def detect_equal_highs_lows(df: pd.DataFrame, tolerance_pct: float = 0.001) -> dict:
+    """
+    Equal Highs (EQH) = double/triple top → liquidity pool above (bulls stop-hunted)
+    Equal Lows (EQL)  = double/triple bottom → liquidity pool below (bears stop-hunted)
+    Returns: {eqh: price, eql: price, eqh_swept: bool, eql_swept: bool}
+    """
+    result = {"eqh": 0.0, "eql": 0.0, "eqh_swept": False, "eql_swept": False}
+    if len(df) < 20:
+        return result
+
+    highs  = df["high"].values
+    lows   = df["low"].values
+    close  = float(df["close"].iloc[-1])
+
+    # Find equal highs: recent highs within 0.1% of each other
+    recent_highs = highs[-50:]
+    for i in range(len(recent_highs) - 1):
+        for j in range(i + 1, len(recent_highs)):
+            if abs(recent_highs[i] - recent_highs[j]) / recent_highs[i] < tolerance_pct:
+                result["eqh"] = round(float(max(recent_highs[i], recent_highs[j])), 2)
+                # Was it swept (price closed above then came back)?
+                result["eqh_swept"] = close < result["eqh"] * (1 - tolerance_pct * 2)
+                break
+        if result["eqh"]:
+            break
+
+    recent_lows = lows[-50:]
+    for i in range(len(recent_lows) - 1):
+        for j in range(i + 1, len(recent_lows)):
+            if abs(recent_lows[i] - recent_lows[j]) / recent_lows[i] < tolerance_pct:
+                result["eql"] = round(float(min(recent_lows[i], recent_lows[j])), 2)
+                result["eql_swept"] = close > result["eql"] * (1 + tolerance_pct * 2)
+                break
+        if result["eql"]:
+            break
+
+    return result
+
+
+def detect_displacement(df: pd.DataFrame, atr: float) -> dict:
+    """
+    Displacement = an aggressive impulsive move leaving FVGs behind.
+    Characteristics: large body (>1.5x ATR), closes above/below key levels,
+    often followed by retracement back to OB/FVG.
+    """
+    result = {"displaced": False, "direction": "", "displacement_high": 0.0, "displacement_low": 0.0}
+    if len(df) < 5:
+        return result
+
+    # Check last 3 bars for displacement candle
+    for i in range(-3, 0):
+        row  = df.iloc[i]
+        body = abs(float(row["close"]) - float(row["open"]))
+        if body >= atr * 1.5:
+            direction = "UP" if float(row["close"]) > float(row["open"]) else "DOWN"
+            result["displaced"]         = True
+            result["direction"]         = direction
+            result["displacement_high"] = float(row["high"])
+            result["displacement_low"]  = float(row["low"])
+            break
+
+    return result
+
+
+def get_prev_day_levels(df_1h: pd.DataFrame) -> dict:
+    """Previous day High/Low/Close — key S/R levels."""
+    result = {"pdh": 0.0, "pdl": 0.0, "pdc": 0.0, "pwh": 0.0, "pwl": 0.0}
+    if df_1h.empty:
+        return result
+    df_1h = df_1h.copy()
+    df_1h["date"] = df_1h["timestamp"].dt.date
+    by_day = df_1h.groupby("date")
+    dates  = sorted(by_day.groups.keys())
+
+    if len(dates) >= 2:
+        prev_day = by_day.get_group(dates[-2])
+        result["pdh"] = float(prev_day["high"].max())
+        result["pdl"] = float(prev_day["low"].min())
+        result["pdc"] = float(prev_day["close"].iloc[-1])
+
+    # Previous week H/L (last 5+ trading days)
+    if len(dates) >= 6:
+        week_data = df_1h[df_1h["date"].isin(dates[-6:-1])]
+        result["pwh"] = float(week_data["high"].max())
+        result["pwl"] = float(week_data["low"].min())
+
+    return result
+
+
+def get_inversion_fvg(fvg_df: pd.DataFrame, price: float, df: pd.DataFrame) -> dict:
+    """
+    Inversion FVG: a mitigated FVG that flips polarity.
+    - Bullish FVG filled → now acts as resistance (bearish)
+    - Bearish FVG filled → now acts as support (bullish)
+    """
+    result = {"type": "", "top": 0.0, "bot": 0.0}
+    if fvg_df.empty:
+        return result
+    current_price = float(df["close"].iloc[-1])
+
+    for i in range(len(fvg_df) - 1, max(len(fvg_df) - 30, -1), -1):
+        row = fvg_df.iloc[i]
+        fvg = row.get("FVG", 0)
+        top = float(row.get("Top", 0) or 0)
+        bot = float(row.get("Bottom", 0) or 0)
+        mit = row.get("MitigatedIndex", None)
+
+        if top == 0 or bot == 0 or pd.isna(mit) or mit is None:
+            continue
+
+        # Mitigated FVG — check if price is retesting it
+        mid = (top + bot) / 2
+        if abs(current_price - mid) < (top - bot) * 1.5:
+            if fvg == 1:   # was bullish, now flipped = resistance
+                result = {"type": "INVERSION_RESIST", "top": top, "bot": bot}
+            elif fvg == -1:
+                result = {"type": "INVERSION_SUPPORT", "top": top, "bot": bot}
+            break
+    return result
+
+
+def get_htf_fvg(fvg_1h: pd.DataFrame, fvg_4h: pd.DataFrame, price: float, atr: float) -> dict:
+    """Check if price is inside a 1H or 4H FVG (higher confluence)."""
+    tol = atr * 1.0
+    for fvg_df, label in [(fvg_4h, "4H"), (fvg_1h, "1H")]:
+        if fvg_df.empty:
+            continue
+        for i in range(len(fvg_df)-1, max(len(fvg_df)-20,-1), -1):
+            row = fvg_df.iloc[i]
+            fvg = row.get("FVG", 0)
+            top = float(row.get("Top", 0) or 0)
+            bot = float(row.get("Bottom", 0) or 0)
+            mit = row.get("MitigatedIndex", None)
+            if top == 0 or bot == 0 or not (pd.isna(mit) or mit is None):
+                continue
+            if bot - tol <= price <= top + tol:
+                t = "BULLISH" if fvg == 1 else "BEARISH"
+                return {"type": t, "tf": label, "top": top, "bot": bot}
+    return {}
+
+
+def get_swing_range(swings_df: pd.DataFrame, df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
+    """Get recent swing high and swing low for OTE / P/D calculation."""
+    if swings_df.empty:
+        tail = df.tail(lookback)
+        return float(tail["high"].max()), float(tail["low"].min())
+
+    highs = []
+    lows  = []
+    swing_tail = swings_df.tail(lookback * 2)
+    for i, row in swing_tail.iterrows():
+        hl = row.get("HighLow", 0)
+        lv = row.get("Level", 0)
+        if hl == 1 and lv:  highs.append(float(lv))
+        if hl == -1 and lv: lows.append(float(lv))
+
+    sh = max(highs) if highs else float(df.tail(lookback)["high"].max())
+    sl = min(lows)  if lows  else float(df.tail(lookback)["low"].min())
+    return sh, sl
 
 
 # ── SL / TP Calculation ────────────────────────────────────────────────────────
@@ -733,7 +1038,8 @@ def _calc_sl_tp(direction: str, price: float, atr: float,
 
 def analyze_order_flow(df_15m: pd.DataFrame = None,
                         df_1h: pd.DataFrame = None,
-                        df_4h: pd.DataFrame = None) -> OFSignal:
+                        df_4h: pd.DataFrame = None,
+                        df_5m: pd.DataFrame = None) -> OFSignal:
     """
     Full order flow analysis. Fetches data if DataFrames not provided.
     Returns OFSignal with BUY/SELL/WAIT + full context.
@@ -747,6 +1053,8 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
         df_1h  = _fetch("1h",  "60d")
     if df_4h is None:
         df_4h  = _fetch("4h",  "120d")
+    if df_5m is None:
+        df_5m  = _fetch("5m",  "3d")
 
     if df_15m.empty:
         return OFSignal(action="WAIT", strength="WAIT", reasons=["No data available"])
@@ -761,6 +1069,7 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
 
     # ── SMC on each timeframe ──────────────────────────────────────────────────
     logger.info("[OF] Running SMC indicators...")
+    smc_5m  = get_smc_analysis(df_5m)
     smc_15m = get_smc_analysis(df_15m)
     smc_1h  = get_smc_analysis(df_1h)
     smc_4h  = get_smc_analysis(df_4h)
@@ -784,22 +1093,29 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
     # ── CVD ───────────────────────────────────────────────────────────────────
     cvd = compute_cvd(df_15m)
 
+    # ── Tape reader (5m for precision) ────────────────────────────────────────
+    logger.info("[OF] Reading tape...")
+    from xauusd.tape_reader import analyze_tape
+    tape = analyze_tape(df_5m if not df_5m.empty else df_15m)
+
     # ── Asian range ────────────────────────────────────────────────────────────
     asian_hi, asian_lo = get_asian_range(df_1h)
 
     # ── Score both directions ──────────────────────────────────────────────────
-    logger.info("[OF] Scoring BUY direction...")
+    logger.info("[OF] Scoring BUY direction (40-pt system)...")
     buy_score,  buy_reasons  = _score_direction(
-        "BUY", price, atr, smc_15m, smc_1h, struct_4h, htf_bias,
-        vp, vwap_data, cvd, killzone, asian_hi, asian_lo
+        "BUY",  price, atr, smc_15m, smc_1h, smc_4h, struct_4h, htf_bias,
+        vp, vwap_data, cvd, tape, killzone, asian_hi, asian_lo,
+        df_15m, df_1h, df_4h
     )
-    logger.info("[OF] Scoring SELL direction...")
+    logger.info("[OF] Scoring SELL direction (40-pt system)...")
     sell_score, sell_reasons = _score_direction(
-        "SELL", price, atr, smc_15m, smc_1h, struct_4h, htf_bias,
-        vp, vwap_data, cvd, killzone, asian_hi, asian_lo
+        "SELL", price, atr, smc_15m, smc_1h, smc_4h, struct_4h, htf_bias,
+        vp, vwap_data, cvd, tape, killzone, asian_hi, asian_lo,
+        df_15m, df_1h, df_4h
     )
 
-    logger.info(f"[OF] BUY={buy_score} SELL={sell_score} threshold={SCORE_BUY_THRESHOLD}")
+    logger.info(f"[OF] BUY={buy_score} SELL={sell_score} threshold={SCORE_BUY_THRESHOLD}/40")
 
     # ── Decision ──────────────────────────────────────────────────────────────
     if buy_score >= SCORE_BUY_THRESHOLD and buy_score > sell_score:
@@ -811,14 +1127,15 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
         score     = sell_score
         reasons   = sell_reasons
     else:
-        # WAIT — include best reasons for transparency
         all_r = buy_reasons[:3] if buy_score > sell_score else sell_reasons[:3]
         return OFSignal(
             action="WAIT", strength="WAIT", score=max(buy_score, sell_score),
+            max_score=40,
             entry=price, atr=atr, killzone=killzone, htf_bias=htf_bias,
             structure=struct_4h, poc=vp.get("poc",0), vah=vp.get("vah",0),
             val=vp.get("val",0), vwap=vwap_data.get("vwap",0),
-            cvd_bias=cvd.get("bias",""), reasons=all_r or ["Score below threshold"],
+            cvd_bias=tape.get("tape_bias","") or cvd.get("bias",""),
+            reasons=all_r or ["Score below threshold — wait for killzone + OB/FVG confluence"],
             timestamp=ts if isinstance(ts, datetime) else datetime.now(timezone.utc),
         )
 
@@ -844,7 +1161,8 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
         target3      = tp3,
         risk_reward  = round(rr, 2),
         score        = score,
-        confidence   = round(score / 20, 2),
+        max_score    = 40,
+        confidence   = round(score / 40, 2),
         atr          = round(atr, 2),
         killzone     = killzone,
         htf_bias     = htf_bias,
@@ -858,7 +1176,7 @@ def analyze_order_flow(df_15m: pd.DataFrame = None,
         vah          = vp.get("vah", 0.0),
         val          = vp.get("val", 0.0),
         vwap         = vwap_data.get("vwap", 0.0),
-        cvd_bias     = cvd.get("divergence_type", "") or cvd.get("bias", ""),
+        cvd_bias     = tape.get("tape_bias","") or cvd.get("divergence_type", "") or cvd.get("bias", ""),
         liq_swept    = swept,
         liq_level    = liq_lvl,
         reasons      = reasons,

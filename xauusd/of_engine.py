@@ -35,6 +35,7 @@ MAX_HISTORY     = 200
 _last_action    = "WAIT"
 _last_signal_ts = 0.0
 _history: list  = []
+_active_trade   = None   # {entry, sl, tp1, tp2, direction, reasons, open_ts}
 
 
 def _load_history() -> list:
@@ -113,7 +114,7 @@ def _should_alert(sig, prev_action: str, prev_ts: float) -> bool:
 def _print_signal(sig):
     sep = "=" * 60
     if not sig.is_trade():
-        logger.info(f"WAIT | score={sig.score}/20 | HTF={sig.htf_bias} | KZ={sig.killzone}")
+        logger.info(f"WAIT | score={sig.score}/{sig.max_score} | HTF={sig.htf_bias} | KZ={sig.killzone or 'none'} | {' | '.join(sig.reasons[:2])}")
         return
     emoji = "BUY ▲" if sig.action == "BUY" else "SELL ▼"
     print(f"\n{sep}")
@@ -144,26 +145,63 @@ def _print_signal(sig):
 def run(once: bool = False):
     global _last_action, _last_signal_ts, _history
 
+    global _last_action, _last_signal_ts, _history, _active_trade
     _history = _load_history()
 
     from xauusd.of_strategy import analyze_order_flow, _fetch
+    from xauusd.score_learner import record_trade_outcome
 
     print("=" * 60)
-    print("  XAUUSD Order Flow Engine")
-    print("  Strategy: SMC + Volume Profile + CVD + VWAP + Killzones")
-    print("  Interval: 5 min  |  Threshold: 11/20")
+    print("  XAUUSD Order Flow Engine  v3")
+    print("  SMC + VP + CVD + Tape + OTE + P/D + EQH/L + Killzones")
+    print("  Interval: 5 min  |  Threshold: 22/40  |  Strong: 28/40")
     print("=" * 60)
 
     while True:
         try:
-            logger.info("[OF-Engine] Fetching multi-timeframe data...")
+            logger.info("[OF-Engine] Fetching multi-timeframe data (5m/15m/1H/4H)...")
+            df_5m  = _fetch("5m",  "3d")
             df_15m = _fetch("15m", "5d")
             df_1h  = _fetch("1h",  "60d")
             df_4h  = _fetch("4h",  "120d")
 
-            sig = analyze_order_flow(df_15m, df_1h, df_4h)
+            sig = analyze_order_flow(df_15m, df_1h, df_4h, df_5m)
             _write_signal_json(sig)
             _print_signal(sig)
+
+            # ── Track active trade SL/TP for learning ─────────────────────────
+            price_now = sig.entry
+            if _active_trade:
+                t = _active_trade
+                if t["direction"] == "BUY":
+                    if price_now <= t["sl"]:
+                        logger.warning(f"[OF-Engine] TRADE CLOSED — SL HIT — LOSS @ {price_now:.2f}")
+                        record_trade_outcome(t["reasons"], "LOSS")
+                        _active_trade = None
+                        _send_telegram(f"🛑 <b>OF SL HIT</b> @ ${price_now:.2f} | Learning from loss...")
+                    elif price_now >= t["tp2"]:
+                        logger.info(f"[OF-Engine] TRADE CLOSED — TP2 HIT — WIN @ {price_now:.2f}")
+                        record_trade_outcome(t["reasons"], "WIN")
+                        _active_trade = None
+                        _send_telegram(f"🎯 <b>OF TP2 HIT</b> @ ${price_now:.2f} | Boosting winning factors!")
+                elif t["direction"] == "SELL":
+                    if price_now >= t["sl"]:
+                        logger.warning(f"[OF-Engine] TRADE CLOSED — SL HIT — LOSS @ {price_now:.2f}")
+                        record_trade_outcome(t["reasons"], "LOSS")
+                        _active_trade = None
+                        _send_telegram(f"🛑 <b>OF SL HIT</b> @ ${price_now:.2f} | Learning from loss...")
+                    elif price_now <= t["tp2"]:
+                        logger.info(f"[OF-Engine] TRADE CLOSED — TP2 HIT — WIN @ {price_now:.2f}")
+                        record_trade_outcome(t["reasons"], "WIN")
+                        _active_trade = None
+                        _send_telegram(f"🎯 <b>OF TP2 HIT</b> @ ${price_now:.2f} | Boosting winning factors!")
+
+            if sig.is_trade() and _should_alert(sig, _last_action, _last_signal_ts):
+                _active_trade = {
+                    "direction": sig.action, "entry": sig.entry,
+                    "sl": sig.stop_loss, "tp1": sig.target1, "tp2": sig.target2,
+                    "reasons": sig.reasons, "open_ts": str(sig.timestamp),
+                }
 
             # Append to history
             _history.append({
