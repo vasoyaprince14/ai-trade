@@ -1581,6 +1581,240 @@ Threshold: **12/20** points | Strong: **16/20**
             except Exception as e:
                 st.error(f"Stock scan error: {e}")
 
+    # ── Finology Fundamentals Screen ───────────────────────────────────────────
+    st.divider()
+    st.markdown("### 📊 Nifty 50 Fundamentals — Finology Screen")
+    st.caption("Scrapes ticker.finology.in for P/E, ROE, ROCE, Promoter %, Pledging & composite score per stock")
+
+    fin_b1, fin_b2, fin_b3, _ = st.columns([1.2, 1.2, 1.2, 5])
+    with fin_b1:
+        finology_run = st.button("▶ Run Screen (50 stocks)", key="fin_run", type="primary")
+    with fin_b2:
+        finology_quick = st.button("▶ Quick (5 stocks)", key="fin_quick")
+    with fin_b3:
+        if st.button("⟳ Clear Cache", key="fin_clear"):
+            import shutil, pathlib
+            shutil.rmtree("/tmp/finology_cache", ignore_errors=True)
+            st.success("Cache cleared")
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _load_finology_screen(tickers_key: str) -> list:
+        from core.data.finology import get_nifty50_screen, NIFTY50_TICKERS
+        tickers = NIFTY50_TICKERS if tickers_key == "all" else NIFTY50_TICKERS[:5]
+        return get_nifty50_screen(tickers)
+
+    fin_results = None
+    if finology_run:
+        with st.spinner("Scraping Finology for all 50 Nifty stocks (~90s, cached 1h)..."):
+            try:
+                fin_results = _load_finology_screen("all")
+            except Exception as _fe:
+                st.error(f"Finology error: {_fe}")
+    elif finology_quick:
+        with st.spinner("Scraping 5 Nifty stocks from Finology..."):
+            try:
+                _load_finology_screen.clear()
+                fin_results = _load_finology_screen("quick")
+            except Exception as _fe:
+                st.error(f"Finology error: {_fe}")
+    else:
+        # Try loading from cache silently
+        try:
+            import pathlib
+            cache_dir = pathlib.Path("/tmp/finology_cache")
+            cached_files = list(cache_dir.glob("*.json")) if cache_dir.exists() else []
+            if len(cached_files) >= 5:
+                import json as _fj
+                _cached = []
+                for cf in sorted(cached_files, key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+                    try:
+                        d = _fj.loads(cf.read_text())
+                        if "error" not in d and d.get("screener_score") is not None:
+                            _cached.append(d)
+                    except Exception:
+                        pass
+                if _cached:
+                    fin_results = sorted(_cached, key=lambda x: x.get("screener_score", 0), reverse=True)
+        except Exception:
+            pass
+
+    if fin_results:
+        # Summary bar
+        scores   = [s.get("screener_score", 0) for s in fin_results]
+        promos   = [s["promoter_pct"] for s in fin_results if s.get("promoter_pct")]
+        pledges  = [s.get("promoter_pledging_pct") or 0 for s in fin_results]
+        rising   = sum(1 for s in fin_results
+                       if len(s.get("promoter_history", [])) >= 2
+                       and all(h.get("promoter") is not None for h in s["promoter_history"][-2:])
+                       and s["promoter_history"][-1]["promoter"] > s["promoter_history"][-2]["promoter"])
+
+        avg_score  = sum(scores) / len(scores) if scores else 0
+        avg_promo  = sum(promos) / len(promos) if promos else 0
+        avg_pledge = sum(pledges) / len(pledges) if pledges else 0
+        high_pledge_ct = sum(1 for p in pledges if p > 20)
+
+        sm1, sm2, sm3, sm4, sm5 = st.columns(5)
+        sm1.metric("Stocks Screened", len(fin_results))
+        sm2.metric("Avg Score",       f"{avg_score:.1f}/10",
+                   delta=f"{'▲ Bullish' if avg_score > 5 else '▼ Bearish'}")
+        sm3.metric("Avg Promoter",    f"{avg_promo:.1f}%")
+        sm4.metric("Rising Promoter", f"{rising}/{len(fin_results)}",
+                   delta="Increasing" if rising > len(fin_results) // 2 else None)
+        sm5.metric("High Pledging",   f"{high_pledge_ct} stocks",
+                   delta="Risk" if high_pledge_ct > 5 else None,
+                   delta_color="inverse")
+
+        # Inst sentiment banner
+        inst_score = 5.0
+        if avg_promo > 50:   inst_score += 1.0
+        if rising > len(fin_results) * 0.4: inst_score += 1.0
+        if high_pledge_ct < 5: inst_score += 0.5
+        if avg_score > 6:    inst_score += 1.0
+        inst_score = min(inst_score, 10.0)
+        inst_color = "#00d4aa" if inst_score >= 6.5 else ("#ffa500" if inst_score >= 5 else "#ff4b4b")
+        inst_label = "BULLISH" if inst_score >= 6.5 else ("NEUTRAL" if inst_score >= 5 else "BEARISH")
+        st.markdown(
+            f"<div style='background:#1a1d2e;border-radius:8px;padding:0.6rem 1rem;"
+            f"border-left:4px solid {inst_color};margin-bottom:1rem;'>"
+            f"<span style='color:{inst_color};font-weight:700;'>Institutional Sentiment: {inst_label}</span>"
+            f"<span style='color:#888;font-size:0.85rem;'> &nbsp;Score {inst_score:.1f}/10 · "
+            f"Avg promoter {avg_promo:.1f}% · {rising} rising · "
+            f"Avg pledging {avg_pledge:.1f}%</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Main table
+        rows_fin = []
+        for s in fin_results:
+            hist = s.get("promoter_history", [])
+            promo_trend = "—"
+            if len(hist) >= 2:
+                p0 = hist[-2].get("promoter")
+                p1 = hist[-1].get("promoter")
+                if p0 is not None and p1 is not None:
+                    promo_trend = f"▲ {p1-p0:+.2f}%" if p1 > p0 else (f"▼ {p1-p0:+.2f}%" if p1 < p0 else "→ flat")
+
+            rows_fin.append({
+                "Ticker":        s.get("ticker", ""),
+                "Company":       (s.get("company_name") or "")[:28],
+                "Score":         s.get("screener_score", 0),
+                "P/E":           s.get("pe"),
+                "P/B":           s.get("pb"),
+                "ROE%":          s.get("roe"),
+                "ROCE%":         s.get("roce"),
+                "Promoter%":     s.get("promoter_pct"),
+                "Pledging%":     s.get("promoter_pledging_pct") or 0.0,
+                "Promo Trend":   promo_trend,
+                "Profit Gr%":    s.get("profit_growth"),
+                "MCap (Cr)":     s.get("market_cap_cr"),
+            })
+
+        df_fin = pd.DataFrame(rows_fin)
+
+        def _style_score(val):
+            if val is None: return ""
+            if val >= 7:  return "background-color:#0d3321;color:#00d4aa;font-weight:bold"
+            if val >= 5:  return "background-color:#1a2200;color:#d4d400"
+            return "background-color:#2d0d0d;color:#ff6b6b"
+
+        def _style_promo_trend(val):
+            if "▲" in str(val): return "color:#00d4aa;font-weight:bold"
+            if "▼" in str(val): return "color:#ff4b4b"
+            return "color:#888"
+
+        def _style_pledging(val):
+            try:
+                v = float(val)
+                if v > 30: return "color:#ff4b4b;font-weight:bold"
+                if v > 15: return "color:#ffa500"
+            except Exception: pass
+            return ""
+
+        styled = (
+            df_fin.style
+            .map(_style_score,       subset=["Score"])
+            .map(_style_promo_trend, subset=["Promo Trend"])
+            .map(_style_pledging,    subset=["Pledging%"])
+            .format({
+                "Score":      "{:.1f}",
+                "P/E":        lambda v: f"{v:.1f}" if v else "—",
+                "P/B":        lambda v: f"{v:.2f}" if v else "—",
+                "ROE%":       lambda v: f"{v:.1f}%" if v else "—",
+                "ROCE%":      lambda v: f"{v:.1f}%" if v else "—",
+                "Promoter%":  lambda v: f"{v:.1f}%" if v else "—",
+                "Pledging%":  lambda v: f"{v:.1f}%" if v else "—",
+                "Profit Gr%": lambda v: f"{v:+.1f}%" if v else "—",
+                "MCap (Cr)":  lambda v: f"₹{v:,.0f}" if v else "—",
+            }, na_rep="—")
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=450)
+
+        # Top-3 deep dive cards
+        st.markdown("#### Top 3 by Screener Score")
+        top3_cols = st.columns(3)
+        for i, s in enumerate(fin_results[:3]):
+            with top3_cols[i]:
+                sc_color = "#00d4aa" if (s.get("screener_score") or 0) >= 7 else "#fbbf24"
+                hist = s.get("promoter_history", [])
+                hist_line = " → ".join(f"{h['promoter']:.1f}%" for h in hist[-4:] if h.get("promoter") is not None)
+                sigs = s.get("screener_signals", [])
+                st.markdown(
+                    f"<div style='background:#1a1d2e;border-radius:10px;padding:1rem;"
+                    f"border-top:3px solid {sc_color};'>"
+                    f"<div style='color:{sc_color};font-size:1.1rem;font-weight:700;'>"
+                    f"#{i+1} {s.get('ticker')}</div>"
+                    f"<div style='color:#ccc;font-size:0.78rem;margin-bottom:0.4rem;'>"
+                    f"{(s.get('company_name') or '')[:30]}</div>"
+                    f"<div style='font-size:1.8rem;font-weight:800;color:{sc_color};'>"
+                    f"{s.get('screener_score', 0):.1f}<span style='font-size:0.9rem;color:#888;'>/10</span></div>"
+                    f"<div style='color:#aaa;font-size:0.78rem;margin-top:0.4rem;'>"
+                    f"P/E {s.get('pe','—')} · ROE {s.get('roe','—')}% · ROCE {s.get('roce','—')}%<br>"
+                    f"Promoter {s.get('promoter_pct','—')}% · Pledging {s.get('promoter_pledging_pct') or 0:.1f}%<br>"
+                    f"Hist: {hist_line or '—'}</div>"
+                    f"<div style='color:#666;font-size:0.72rem;margin-top:0.4rem;'>"
+                    + "".join(f"<span style='background:#0d3321;color:#00d4aa;border-radius:4px;"
+                               f"padding:1px 5px;margin:1px;display:inline-block;'>{sg}</span>"
+                               for sg in sigs[:4])
+                    + "</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Promoter holding trend chart for top 10
+        top10 = fin_results[:10]
+        hist_data = []
+        for s in top10:
+            for h in s.get("promoter_history", []):
+                if h.get("promoter") is not None:
+                    hist_data.append({
+                        "Ticker":  s["ticker"],
+                        "Quarter": h["quarter"],
+                        "Promoter%": h["promoter"],
+                    })
+
+        if hist_data:
+            df_hist = pd.DataFrame(hist_data)
+            fig_promo = go.Figure()
+            for ticker in df_hist["Ticker"].unique():
+                sub = df_hist[df_hist["Ticker"] == ticker]
+                fig_promo.add_trace(go.Scatter(
+                    x=sub["Quarter"], y=sub["Promoter%"],
+                    name=ticker, mode="lines+markers",
+                    line=dict(width=1.5), marker=dict(size=5),
+                ))
+            fig_promo.update_layout(
+                title="Promoter Holding Trend — Top 10 Stocks",
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                font=dict(color="#ccc"), height=320,
+                legend=dict(orientation="h", y=-0.25, font=dict(size=10)),
+                xaxis=dict(gridcolor="#1e2130"),
+                yaxis=dict(gridcolor="#1e2130", title="Promoter %"),
+                margin=dict(t=40, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_promo, use_container_width=True)
+    else:
+        st.info("Click **Run Screen** to fetch Finology fundamentals for all 50 Nifty stocks (cached 1h). "
+                "Or **Quick** for a 5-stock sample.")
+
 
 # ══ TAB 9: BULL VS BEAR DEBATE ═══════════════════════════════════════════════
 with tabs[8]:
