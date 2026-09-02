@@ -2260,6 +2260,8 @@ with tabs[10]:
 # ══ TAB 12: ORDER FLOW STRATEGY (v3 — 40-pt scoring) ════════════════════════
 with tabs[11]:
 
+    FILTER_WINDOW_MIN = 30   # minutes — highlight events this close
+
     # ── helpers ──────────────────────────────────────────────────────────────
     def _of_load_signal():
         try:
@@ -2295,17 +2297,28 @@ Tape Reader · OTE · Premium/Discount · EQH/EQL · ICT Killzones · Self-Learn
         st.caption("Engine: `python3 xauusd/of_engine.py` — signals fire at 22/40 during London/NY killzones")
 
     if run_now:
-        with st.spinner("Running 40-point order flow analysis (~15s)..."):
+        with st.spinner("Running 40-point order flow analysis + news feed (~20s)..."):
             try:
                 from xauusd.of_strategy import analyze_order_flow
-                _s = analyze_order_flow()
+                from xauusd.news_feed import get_news_context as _get_news
+                _s   = analyze_order_flow()
+                _nws = _get_news(force=True)
                 import json as _j
+                _data = {k: getattr(_s,k) if not callable(getattr(_s,k)) else None
+                         for k in _s.__dataclass_fields__ if k != "timestamp"}
+                _data.update({
+                    "timestamp":  str(_s.timestamp), "max_score": _s.max_score,
+                    "news_sentiment":       _nws.get("sentiment","NEUTRAL"),
+                    "news_sentiment_score": _nws.get("sentiment_score",0.0),
+                    "news_filter":          _nws.get("news_filter",False),
+                    "news_filter_reason":   _nws.get("news_filter_reason",""),
+                    "news_headlines":       _nws.get("headlines",[])[:6],
+                    "news_calendar":        _nws.get("calendar",[])[:8],
+                    "news_fetched_at":      _nws.get("fetched_at",""),
+                })
                 with open("/tmp/xauusd_of_signal.json","w") as _f:
-                    _j.dump({k: getattr(_s,k) if not callable(getattr(_s,k)) else None
-                              for k in _s.__dataclass_fields__
-                              if k != "timestamp"} | {"timestamp": str(_s.timestamp),
-                              "max_score": _s.max_score}, _f, indent=2, default=str)
-                st.success(f"{_of_action_emoji(_s.action)} {_s.action} {_s.strength} — score {_s.score}/{_s.max_score}")
+                    _j.dump(_data, _f, indent=2, default=str)
+                st.success(f"{_of_action_emoji(_s.action)} {_s.action} {_s.strength} — score {_s.score}/{_s.max_score} | News: {_nws['sentiment']}")
                 st.rerun()
             except Exception as _e:
                 st.error(f"Error: {_e}")
@@ -2502,6 +2515,88 @@ border:1px solid #2d3250;font-size:0.9rem;'>
         st.markdown(f"<div style='line-height:2;'>{badges_html}</div>", unsafe_allow_html=True)
     else:
         st.caption("No active confluence — waiting for setup.")
+
+    st.divider()
+
+    # ══ SECTION 4b: GOLD NEWS FEED + ECONOMIC CALENDAR ═══════════════════════
+    st.markdown("### Gold News + Economic Calendar")
+
+    # Read news from signal JSON (updated by engine) or fetch fresh
+    news_sent    = of_sig.get("news_sentiment", "NEUTRAL")
+    news_score   = of_sig.get("news_sentiment_score", 0.0)
+    news_filter  = of_sig.get("news_filter", False)
+    news_reason  = of_sig.get("news_filter_reason", "")
+    news_heads   = of_sig.get("news_headlines", [])
+    news_cal     = of_sig.get("news_calendar", [])
+    news_fetched = of_sig.get("news_fetched_at", "")
+
+    nc1, nc2, nc3, nc4 = st.columns(4)
+    sent_col = {"BULLISH": "#00d4aa", "BEARISH": "#ff4b4b"}.get(news_sent, "#ffa500")
+    nc1.metric("News Sentiment", news_sent)
+    nc2.metric("Sentiment Score", f"{news_score:+.2f}")
+    nc3.metric("Headlines (4h)", len(news_heads))
+    nc4.metric("USD Events (8h)", len(news_cal))
+
+    if news_filter:
+        st.markdown(f"""
+<div style='background:#3a1010;border:1px solid #ff4b4b;border-radius:8px;padding:0.6rem 1.2rem;margin:0.5rem 0;'>
+  ⚠️ <b style='color:#ff4b4b;'>NEWS FILTER ACTIVE:</b>
+  <span style='color:#fca5a5;'> {news_reason}</span>
+  <span style='color:#888;font-size:0.85rem;'> — Avoid entering new trades!</span>
+</div>""", unsafe_allow_html=True)
+
+    nl, nr = st.columns(2)
+
+    with nl:
+        if news_heads:
+            st.markdown("**Recent Gold Headlines**")
+            for h in news_heads[:5]:
+                s_val  = h.get("sentiment", 0)
+                age    = h.get("age_min", 0)
+                title  = h.get("title", "")[:70]
+                pub    = h.get("publisher", "")
+                if s_val > 0.1:    s_icon, s_col = "↑", "#00d4aa"
+                elif s_val < -0.1: s_icon, s_col = "↓", "#ff4b4b"
+                else:              s_icon, s_col = "→", "#888"
+                st.markdown(
+                    f"<div style='background:#1a1d2e;border-radius:6px;padding:0.4rem 0.8rem;"
+                    f"margin-bottom:4px;border-left:3px solid {s_col};'>"
+                    f"<span style='color:{s_col};font-weight:bold;'>{s_icon}</span> "
+                    f"<span style='font-size:0.85rem;'>{title}</span>"
+                    f"<br><span style='color:#888;font-size:0.75rem;'>{pub} · {age}m ago</span>"
+                    f"</div>", unsafe_allow_html=True
+                )
+        else:
+            if news_fetched:
+                st.caption(f"No headlines in last 4h (fetched {news_fetched})")
+            else:
+                st.caption("Run engine to load news — click Run Now or start `python3 xauusd/of_engine.py`")
+
+    with nr:
+        if news_cal:
+            st.markdown("**Upcoming USD Events**")
+            for ev in news_cal[:6]:
+                ma       = ev.get("minutes_away", 0)
+                title    = ev.get("title", "")
+                impact   = ev.get("impact", "")
+                when     = "NOW" if ma <= 0 else (f"in {ma}m" if ma < 60 else f"in {ma//60}h {ma%60}m")
+                is_mover = ev.get("is_gold_mover", False)
+                imp_col  = "#ff4b4b" if impact == "High" else "#ffa500"
+                star     = " ⭐" if is_mover else ""
+                border   = imp_col if ma <= FILTER_WINDOW_MIN else "#2d3250"
+                st.markdown(
+                    f"<div style='background:#1a1d2e;border-radius:6px;padding:0.35rem 0.8rem;"
+                    f"margin-bottom:4px;border-left:3px solid {border};'>"
+                    f"<span style='color:{imp_col};font-size:0.75rem;font-weight:bold;'>[{impact}]</span> "
+                    f"<span style='font-size:0.85rem;'>{title}{star}</span>"
+                    f"<br><span style='color:#888;font-size:0.75rem;'>{ev.get('date','')[:16]} UTC · {when}</span>"
+                    f"</div>", unsafe_allow_html=True
+                )
+        else:
+            st.caption("No high-impact USD events in the next 8h.")
+
+    if news_fetched:
+        st.caption(f"News last fetched: {news_fetched}")
 
     st.divider()
 

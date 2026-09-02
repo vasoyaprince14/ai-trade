@@ -55,7 +55,7 @@ def _save_history():
         logger.warning(f"[OF-Engine] History save error: {e}")
 
 
-def _write_signal_json(sig):
+def _write_signal_json(sig, news_ctx: dict | None = None):
     try:
         data = {
             "action":       sig.action,
@@ -85,7 +85,15 @@ def _write_signal_json(sig):
             "liq_swept":    sig.liq_swept,
             "liq_level":    sig.liq_level,
             "reasons":      sig.reasons,
+            "max_score":    sig.max_score,
             "timestamp":    sig.timestamp.isoformat() if hasattr(sig.timestamp, "isoformat") else str(sig.timestamp),
+            "news_sentiment":      news_ctx.get("sentiment", "NEUTRAL") if news_ctx else "NEUTRAL",
+            "news_sentiment_score": news_ctx.get("sentiment_score", 0.0) if news_ctx else 0.0,
+            "news_filter":         news_ctx.get("news_filter", False) if news_ctx else False,
+            "news_filter_reason":  news_ctx.get("news_filter_reason", "") if news_ctx else "",
+            "news_headlines":      (news_ctx.get("headlines", [])[:6]) if news_ctx else [],
+            "news_calendar":       (news_ctx.get("calendar", [])[:8]) if news_ctx else [],
+            "news_fetched_at":     news_ctx.get("fetched_at", "") if news_ctx else "",
         }
         with open(SIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -150,10 +158,11 @@ def run(once: bool = False):
 
     from xauusd.of_strategy import analyze_order_flow, _fetch
     from xauusd.score_learner import record_trade_outcome
+    from xauusd.news_feed import get_news_context, print_news_context, news_summary_line
 
     print("=" * 60)
     print("  XAUUSD Order Flow Engine  v3")
-    print("  SMC + VP + CVD + Tape + OTE + P/D + EQH/L + Killzones")
+    print("  SMC + VP + CVD + Tape + OTE + P/D + EQH/L + Killzones + News")
     print("  Interval: 5 min  |  Threshold: 22/40  |  Strong: 28/40")
     print("=" * 60)
 
@@ -165,9 +174,20 @@ def run(once: bool = False):
             df_1h  = _fetch("1h",  "60d")
             df_4h  = _fetch("4h",  "120d")
 
+            # ── News + calendar ────────────────────────────────────────────
+            logger.info("[OF-Engine] Fetching news + economic calendar...")
+            news_ctx = get_news_context()
+            print_news_context(news_ctx)
+
             sig = analyze_order_flow(df_15m, df_1h, df_4h, df_5m)
-            _write_signal_json(sig)
+            _write_signal_json(sig, news_ctx)
             _print_signal(sig)
+
+            # If news filter active, warn + send Telegram alert
+            if news_ctx["news_filter"]:
+                logger.warning(f"[OF-Engine] NEWS FILTER: {news_ctx['news_filter_reason']} — high-impact event imminent!")
+                _send_telegram(f"⚠️ <b>NEWS FILTER</b>: {news_ctx['news_filter_reason']}\n"
+                               f"Avoid new trades — high-impact USD event imminent!")
 
             # ── Track active trade SL/TP for learning ─────────────────────────
             price_now = sig.entry
