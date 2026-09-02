@@ -128,17 +128,19 @@ class GoldSignal:
 
     def telegram_html(self) -> str:
         """Telegram HTML-formatted message."""
-        ts    = self.timestamp.strftime("%d %b %Y  %H:%M UTC")
-        dxy   = self.macro.get("dxy", 0)
-        tnx   = self.macro.get("us10y", 0)
-        vix   = self.macro.get("vix", 0)
+        import html as _html
+        ts     = self.timestamp.strftime("%d %b %Y  %H:%M UTC")
+        dxy    = self.macro.get("dxy", 0)
+        tnx    = self.macro.get("us10y", 0)
+        vix    = self.macro.get("vix", 0)
+        reason = _html.escape(self.reason)
 
         if not self.is_trade():
             return (
                 f"⏳ <b>WAIT — XAUUSD</b>\n"
                 f"Price: <b>${self.entry:.2f}</b> | Trend: {self.trend_1h} | RSI: {self.rsi:.1f}\n"
                 f"Session: {self.session} | DXY: {dxy:.2f}\n"
-                f"<i>{self.reason[:200]}</i>\n"
+                f"<i>{reason[:200]}</i>\n"
                 f"⏰ {ts}"
             )
 
@@ -148,7 +150,7 @@ class GoldSignal:
             f"{emoji} <b>{self.action} XAUUSD</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>Entry:</b>   ${self.entry:.2f}\n"
-            f"🛑 <b>SL:</b>      ${self.stop_loss:.2f}  <i>({risk:.2f} pts)</i>\n"
+            f"🛑 <b>SL:</b>      ${self.stop_loss:.2f}  ({risk:.2f} pts)\n"
             f"🎯 <b>Target:</b>  ${self.target:.2f}\n"
             f"📊 <b>R:R:</b>     1:{self.risk_reward:.1f}   Score: {self.score}/10\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -157,7 +159,7 @@ class GoldSignal:
             f"🌐 <b>DXY:</b> {dxy:.2f}  |  <b>10Y:</b> {tnx:.2f}%  |  <b>VIX:</b> {vix:.1f}\n"
             f"🌍 <b>Session:</b> {self.session}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🧠 <i>{self.reason}</i>\n"
+            f"🧠 <i>{reason}</i>\n"
             f"⏰ {ts}"
         )
 
@@ -281,6 +283,44 @@ def analyze(df_15m: pd.DataFrame, df_1h: pd.DataFrame, macro: dict) -> GoldSigna
     session_pts = 1 if session in ("LONDON+NY", "LONDON", "NEW_YORK") else 0
     _b(session_pts > 0, session_pts, f"{session} session active")
     _s(session_pts > 0, session_pts, f"{session} session active")
+
+    # ── Additional scoring factors (improve accuracy) ──────────────────────
+    # 1. Volume spike: current bar volume > 1.5x 20-bar average
+    if "volume" in m.columns:
+        vol_now = float(m["volume"].iloc[-1])
+        vol_avg = float(m["volume"].iloc[-20:].mean())
+        if vol_avg > 0 and vol_now > vol_avg * 1.5:
+            _b(float(cur["close"]) > float(prev["close"]), 1, f"Volume spike {vol_now/vol_avg:.1f}x avg — bullish")
+            _s(float(cur["close"]) < float(prev["close"]), 1, f"Volume spike {vol_now/vol_avg:.1f}x avg — bearish")
+
+    # 2. EMA21 slope: rate of change over 3 bars (momentum direction)
+    ema21_now  = float(m["e21"].iloc[-1])
+    ema21_3ago = float(m["e21"].iloc[-4]) if len(m) > 4 else ema21_now
+    ema_slope  = ema21_now - ema21_3ago
+    _b(ema_slope > 0.05 * atr, 1, f"EMA21 rising slope (+{ema_slope:.2f})")
+    _s(ema_slope < -0.05 * atr, 1, f"EMA21 falling slope ({ema_slope:.2f})")
+
+    # 3. Previous 3 bars closed in same direction (momentum confirmation)
+    closes = m["close"].iloc[-4:].values
+    all_green = all(closes[i] > closes[i-1] for i in range(1, 4))
+    all_red   = all(closes[i] < closes[i-1] for i in range(1, 4))
+    _b(all_green, 1, "3 consecutive green bars — momentum")
+    _s(all_red,   1, "3 consecutive red bars — momentum")
+
+    # 4. Price distance from EMA55 (overextension check)
+    e55_dist_pct = (float(cur["close"]) - float(cur["e55"])) / float(cur["e55"]) * 100
+    if e55_dist_pct > 0.5:     # price > 0.5% above EMA55 — overextended for buy
+        _s(True, 1, f"Price {e55_dist_pct:.2f}% above EMA55 — stretched short")
+    elif e55_dist_pct < -0.5:  # price > 0.5% below EMA55 — oversold for sell
+        _b(True, 1, f"Price {abs(e55_dist_pct):.2f}% below EMA55 — oversold long")
+
+    # 5. 1H EMA21 slope (medium-term direction)
+    if len(h) >= 4:
+        h_ema21_now  = float(h["e21"].iloc[-1])
+        h_ema21_prev = float(h["e21"].iloc[-3])
+        h_slope = h_ema21_now - h_ema21_prev
+        _b(h_slope > 0, 1, f"1H EMA21 rising (+{h_slope:.2f})")
+        _s(h_slope < 0, 1, f"1H EMA21 falling ({h_slope:.2f})")
 
     # Asia session — lower threshold (more conservative, need score ≥7)
     TRADE_THRESHOLD = 7 if session == "ASIA" else 6
