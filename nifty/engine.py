@@ -27,6 +27,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 POLL_INTERVAL   = 300      # 5 min between scans
 SIGNAL_COOLDOWN = 600      # 10 min between same-direction alerts
+ACTIVATION_PTS  = 10       # pts spot must move to confirm entry
 SIG_FILE        = "/tmp/nifty_signal.json"
 HISTORY_FILE    = ROOT / "data" / "nifty_signal_history.json"
 MAX_HISTORY     = 200
@@ -37,6 +38,9 @@ MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
 _last_action    = "WAIT"
 _last_signal_ts = 0.0
 _history: list  = []
+
+# Pending signal awaiting activation confirmation
+_pending_activation: dict | None = None
 
 
 def _is_market_open() -> bool:
@@ -120,6 +124,69 @@ def _should_alert(sig, prev_action: str, prev_ts: float) -> bool:
     return (now - prev_ts) >= SIGNAL_COOLDOWN
 
 
+def _check_activation(current_spot: float) -> str | None:
+    """
+    Returns a Telegram HTML message if the pending signal's entry is confirmed,
+    or None if not yet activated. Clears pending on activation or SL breach.
+    """
+    global _pending_activation
+    if not _pending_activation:
+        return None
+
+    action    = _pending_activation["action"]
+    sig_spot  = _pending_activation["spot"]
+    sl_spot   = _pending_activation["sl_spot"]
+    tgt_spot  = _pending_activation["target_spot"]
+    atm       = _pending_activation["atm_strike"]
+    expiry    = _pending_activation["expiry"]
+    entry_ce  = _pending_activation["entry_ce"]
+    entry_pe  = _pending_activation["entry_pe"]
+
+    activated = False
+    sl_hit    = False
+
+    if action == "BUY_CE":
+        activated = current_spot >= sig_spot + ACTIVATION_PTS
+        sl_hit    = current_spot <= sl_spot
+    elif action == "BUY_PE":
+        activated = current_spot <= sig_spot - ACTIVATION_PTS
+        sl_hit    = current_spot >= sl_spot
+    elif action == "SELL_STRADDLE":
+        activated = abs(current_spot - atm) <= ACTIVATION_PTS
+        sl_hit    = False  # straddle SL is premium-based, skip here
+
+    if sl_hit:
+        msg = (f"❌ <b>SIGNAL CANCELLED — SL HIT</b>\n"
+               f"Action: {action} | Signal spot: {sig_spot:.0f}\n"
+               f"Current spot: <b>{current_spot:.0f}</b> crossed SL {sl_spot:.0f}\n"
+               f"⏱ {datetime.now(IST).strftime('%d %b %H:%M IST')}")
+        _pending_activation = None
+        return msg
+
+    if activated:
+        action_str = {"BUY_CE": "🟢 BUY CE", "BUY_PE": "🔴 BUY PE",
+                      "SELL_STRADDLE": "⚡ SELL STRADDLE"}.get(action, action)
+        if action == "BUY_CE":
+            entry_line = f"💰 CE Entry  : <b>~{entry_ce:.0f}</b> (buy now)\n"
+        elif action == "BUY_PE":
+            entry_line = f"💰 PE Entry  : <b>~{entry_pe:.0f}</b> (buy now)\n"
+        else:
+            entry_line = f"💰 CE+PE     : <b>~{entry_ce:.0f} + {entry_pe:.0f}</b>\n"
+        msg = (f"🚀 <b>TRADE ACTIVATED — {action_str}</b>\n"
+               f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+               f"📍 Current Spot : <b>{current_spot:.0f}</b>\n"
+               f"🎯 ATM          : <b>{atm}</b>  [{expiry}]\n"
+               f"{entry_line}"
+               f"🛑 SL Spot      : <b>{sl_spot:.0f}</b>\n"
+               f"✅ Target       : <b>{tgt_spot:.0f}</b>\n"
+               f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+               f"⏱ {datetime.now(IST).strftime('%d %b %H:%M IST')}")
+        _pending_activation = None
+        return msg
+
+    return None
+
+
 def _print_signal(sig):
     sep = "=" * 60
     if not sig.is_trade():
@@ -153,7 +220,7 @@ def _print_signal(sig):
 
 
 def run(once: bool = False):
-    global _last_action, _last_signal_ts, _history
+    global _last_action, _last_signal_ts, _history, _pending_activation
     _history = _load_history()
 
     from nifty.strategy import analyze_nifty
@@ -197,12 +264,30 @@ def run(once: bool = False):
             })
             _save_history()
 
-            # Telegram alert
+            # Check if a pending signal has been activated
+            activation_msg = _check_activation(sig.spot)
+            if activation_msg:
+                logger.info("[Nifty-Engine] Trade activated — sending alert...")
+                _send_telegram(activation_msg)
+
+            # New signal alert
             if _should_alert(sig, _last_action, _last_signal_ts):
                 logger.info(f"[Nifty-Engine] Sending {sig.action} alert...")
                 _send_telegram(sig.telegram_html())
                 _last_action    = sig.action
                 _last_signal_ts = time.time()
+                # Register for activation tracking
+                if sig.is_trade():
+                    _pending_activation = {
+                        "action":       sig.action,
+                        "spot":         sig.spot,
+                        "atm_strike":   sig.atm_strike,
+                        "expiry":       sig.expiry,
+                        "entry_ce":     sig.entry_ce,
+                        "entry_pe":     sig.entry_pe,
+                        "sl_spot":      sig.sl_spot,
+                        "target_spot":  sig.target_spot,
+                    }
 
         except Exception as e:
             logger.error(f"[Nifty-Engine] Loop error: {e}")
