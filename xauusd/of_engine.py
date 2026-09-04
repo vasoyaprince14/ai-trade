@@ -28,6 +28,7 @@ from loguru import logger
 # ── Config ─────────────────────────────────────────────────────────────────────
 POLL_INTERVAL   = 300      # seconds between full analyses (5 min)
 SIGNAL_COOLDOWN = 900      # 15 min between same-direction alerts
+ACTIVATION_PTS  = 2.0     # $2 move in trade direction to confirm entry
 SIG_FILE        = "/tmp/xauusd_of_signal.json"
 HISTORY_FILE    = ROOT / "data" / "xauusd_of_trades.json"
 MAX_HISTORY     = 200
@@ -35,7 +36,7 @@ MAX_HISTORY     = 200
 _last_action    = "WAIT"
 _last_signal_ts = 0.0
 _history: list  = []
-_active_trade   = None   # {entry, sl, tp1, tp2, direction, reasons, open_ts}
+_active_trade   = None   # {entry, sl, tp1, tp2, direction, reasons, open_ts, activated}
 
 
 def _load_history() -> list:
@@ -191,6 +192,24 @@ def run(once: bool = False):
 
             # ── Track active trade SL/TP for learning ─────────────────────────
             price_now = sig.entry
+            # Check activation (price moved ACTIVATION_PTS in trade direction)
+            if _active_trade and not _active_trade.get("activated"):
+                t = _active_trade
+                if (t["direction"] == "BUY"  and price_now >= t["entry"] + ACTIVATION_PTS) or \
+                   (t["direction"] == "SELL" and price_now <= t["entry"] - ACTIVATION_PTS):
+                    _active_trade["activated"] = True
+                    action_emoji = "🟢 BUY" if t["direction"] == "BUY" else "🔴 SELL"
+                    _send_telegram(
+                        f"🚀 <b>TRADE ACTIVATED — {action_emoji} XAUUSD (OF)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📍 Current Price : <b>${price_now:.2f}</b>\n"
+                        f"💰 Entry         : <b>${t['entry']:.2f}</b>\n"
+                        f"🛑 Stop Loss     : <b>${t['sl']:.2f}</b>\n"
+                        f"✅ TP1/TP2       : <b>${t['tp1']:.2f} / ${t['tp2']:.2f}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⏰ {datetime.now(timezone.utc).strftime('%d %b %Y  %H:%M UTC')}"
+                    )
+                    logger.info(f"[OF-Engine] Trade activated @ ${price_now:.2f}")
             if _active_trade:
                 t = _active_trade
                 if t["direction"] == "BUY":
@@ -221,6 +240,7 @@ def run(once: bool = False):
                     "direction": sig.action, "entry": sig.entry,
                     "sl": sig.stop_loss, "tp1": sig.target1, "tp2": sig.target2,
                     "reasons": sig.reasons, "open_ts": str(sig.timestamp),
+                    "activated": False,
                 }
 
             # Append to history

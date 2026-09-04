@@ -155,7 +155,10 @@ with tabs[0]:
 
     # Top metrics row
     col1, col2, col3, col4, col5 = st.columns(5)
-    price = sig.entry if sig else 0
+    try:
+        price = get_price()   # GLD-proxy (~1 min delay)
+    except Exception:
+        price = sig.entry if sig else 0
     with col1:
         st.metric("Gold (XAU/USD)", f"${price:,.2f}")
     with col2:
