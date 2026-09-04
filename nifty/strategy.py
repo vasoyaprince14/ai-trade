@@ -184,10 +184,10 @@ def _get_nse_data() -> dict:
         result["atm_strike"] = atm
 
         # Total OI for PCR
-        ce_total = sum(r.get("CE", {}).get("openInterest", 0)
-                       for r in data if r.get("CE") and r.get("expiryDate") == expiry)
-        pe_total = sum(r.get("PE", {}).get("openInterest", 0)
-                       for r in data if r.get("PE") and r.get("expiryDate") == expiry)
+        ce_total = sum((r.get("CE", {}).get("openInterest") or 0)
+                       for r in data if r.get("CE") and r.get("expiryDates") == expiry)
+        pe_total = sum((r.get("PE", {}).get("openInterest") or 0)
+                       for r in data if r.get("PE") and r.get("expiryDates") == expiry)
         result["total_ce_oi"] = ce_total
         result["total_pe_oi"] = pe_total
         if ce_total:
@@ -195,21 +195,21 @@ def _get_nse_data() -> dict:
 
         # ATM strike data
         for row in data:
-            if row.get("expiryDate") != expiry:
+            if row.get("expiryDates") != expiry:
                 continue
             strike = row.get("strikePrice", 0)
             if abs(int(strike) - atm) < 26:  # within 1 strike
                 ce = row.get("CE", {})
                 pe = row.get("PE", {})
                 if ce:
-                    result["ce_ltp"]    = float(ce.get("lastPrice", 0))
-                    result["atm_iv"]    = float(ce.get("impliedVolatility", 15))
-                    result["ce_oi_atm"] = int(ce.get("openInterest", 0))
+                    result["ce_ltp"]    = float(ce.get("lastPrice") or 0)
+                    result["atm_iv"]    = float(ce.get("impliedVolatility") or 15)
+                    result["ce_oi_atm"] = int(ce.get("openInterest") or 0)
                 if pe:
-                    result["pe_ltp"]    = float(pe.get("lastPrice", 0))
+                    result["pe_ltp"]    = float(pe.get("lastPrice") or 0)
                     if not result["atm_iv"]:
-                        result["atm_iv"] = float(pe.get("impliedVolatility", 15))
-                    result["pe_oi_atm"] = int(pe.get("openInterest", 0))
+                        result["atm_iv"] = float(pe.get("impliedVolatility") or 15)
+                    result["pe_oi_atm"] = int(pe.get("openInterest") or 0)
                 break
 
     except Exception as e:
