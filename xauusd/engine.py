@@ -241,7 +241,8 @@ def run(once: bool = False):
                 prev_macro = macro.copy()
 
                 signal = analyze(df_15m, df_1h, macro)
-                current_price = signal.entry
+                live_px = get_price()
+                current_price = live_px if live_px > 0 else signal.entry
 
                 # ── Check open trade for activation ─────────────────────────
                 act_msg = tracker.check_activation(current_price)

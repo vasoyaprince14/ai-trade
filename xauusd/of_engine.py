@@ -191,7 +191,9 @@ def run(once: bool = False):
                                f"Avoid new trades — high-impact USD event imminent!")
 
             # ── Track active trade SL/TP for learning ─────────────────────────
-            price_now = sig.entry
+            from xauusd.data import get_price as _get_price
+            _live = _get_price()
+            price_now = _live if _live > 0 else sig.entry
             # Check activation (price moved ACTIVATION_PTS in trade direction)
             if _active_trade and not _active_trade.get("activated"):
                 t = _active_trade
