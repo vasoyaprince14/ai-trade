@@ -46,8 +46,8 @@ IST = pytz.timezone("Asia/Kolkata")
 # ── Constants ────────────────────────────────────────────────────────────────
 NIFTY_YF     = "^NSEI"
 BN_YF        = "^NSEBANK"
-TRADE_THRESH = 12      # out of 20
-STRONG_THRESH= 16
+TRADE_THRESH = 10      # out of 22 (was 12/20 — lowered so RSI+VIX can substitute NSE data)
+STRONG_THRESH= 15
 LOT_SIZE     = 75      # Nifty lot size
 STRADDLE_IV  = 16.0    # IV% above which prefer straddle over directional
 
@@ -56,7 +56,7 @@ class NiftySignal:
     action:     str        # BUY_CE | BUY_PE | SELL_STRADDLE | WAIT
     strength:   str        # STRONG | MODERATE | WAIT
     score:      int
-    max_score:  int = 20
+    max_score:  int = 24
     spot:       float = 0.0
     atm_strike: int   = 0
     expiry:     str   = ""
@@ -185,9 +185,9 @@ def _get_nse_data() -> dict:
 
         # Total OI for PCR
         ce_total = sum(r.get("CE", {}).get("openInterest", 0)
-                       for r in data if r.get("CE") and r.get("expiryDates") == expiry)
+                       for r in data if r.get("CE") and r.get("expiryDate") == expiry)
         pe_total = sum(r.get("PE", {}).get("openInterest", 0)
-                       for r in data if r.get("PE") and r.get("expiryDates") == expiry)
+                       for r in data if r.get("PE") and r.get("expiryDate") == expiry)
         result["total_ce_oi"] = ce_total
         result["total_pe_oi"] = pe_total
         if ce_total:
@@ -195,7 +195,7 @@ def _get_nse_data() -> dict:
 
         # ATM strike data
         for row in data:
-            if row.get("expiryDates") != expiry:
+            if row.get("expiryDate") != expiry:
                 continue
             strike = row.get("strikePrice", 0)
             if abs(int(strike) - atm) < 26:  # within 1 strike
@@ -272,6 +272,7 @@ def analyze_nifty() -> NiftySignal:
 
     # EMA trend on 15m
     ema9 = ema21 = trend_15m = ""
+    rsi_14 = 50.0
     if not df_15m.empty and len(df_15m) >= 21:
         close_15m = df_15m["close"]
         ema9_s  = _ema(close_15m, 9)
@@ -284,6 +285,29 @@ def analyze_nifty() -> NiftySignal:
             trend_15m = "BEARISH"
         else:
             trend_15m = "NEUTRAL"
+        # RSI 14 on 15m
+        if len(close_15m) >= 14:
+            d = close_15m.diff()
+            up = d.clip(lower=0).rolling(14).mean()
+            dn = (-d.clip(upper=0)).rolling(14).mean()
+            rs = up / dn.replace(0, 1e-9)
+            rsi_series = 100 - 100 / (1 + rs)
+            rsi_14 = float(rsi_series.iloc[-1])
+
+    # India VIX from yfinance (always available as fallback)
+    india_vix = 15.0
+    try:
+        vix_df = yf.download("^INDIAVIX", period="2d", interval="1d", progress=False)
+        if not vix_df.empty:
+            if isinstance(vix_df.columns, pd.MultiIndex):
+                vix_df.columns = [c[0].lower() for c in vix_df.columns]
+            else:
+                vix_df.columns = [c.lower() for c in vix_df.columns]
+            india_vix = float(vix_df["close"].iloc[-1])
+            if not atm_iv:
+                atm_iv = india_vix  # use VIX as IV proxy if NSE data unavailable
+    except Exception:
+        pass
 
     # Last 3 candles structure (5m)
     candle_dir = "NEUTRAL"
@@ -391,11 +415,42 @@ def analyze_nifty() -> NiftySignal:
             straddle_score += 1
             reasons_str.append(f"ATM CE/PE OI balanced ({ce_oi:,}/{pe_oi:,})")
 
+    # 8. RSI 14 on 15m (2 pts) — always available from yfinance
+    if rsi_14 >= 55 and rsi_14 <= 72:
+        buy_ce_score  += 2
+        reasons_ce.append(f"RSI {rsi_14:.0f} bullish momentum (55-72)")
+    elif rsi_14 >= 28 and rsi_14 <= 45:
+        buy_pe_score  += 2
+        reasons_pe.append(f"RSI {rsi_14:.0f} bearish momentum (28-45)")
+    elif rsi_14 > 72:
+        buy_pe_score  += 1
+        straddle_score += 1
+        reasons_pe.append(f"RSI {rsi_14:.0f} overbought — PE bias")
+    elif rsi_14 < 28:
+        buy_ce_score  += 1
+        straddle_score += 1
+        reasons_ce.append(f"RSI {rsi_14:.0f} oversold — CE bias")
+
+    # 9. India VIX regime (2 pts) — always available from yfinance
+    if india_vix < 14:
+        buy_ce_score  += 2
+        buy_pe_score  += 2
+        reasons_ce.append(f"India VIX {india_vix:.1f} very low — cheap options, directional trade")
+        reasons_pe.append(f"India VIX {india_vix:.1f} very low — cheap options, directional trade")
+    elif india_vix < 18:
+        buy_ce_score  += 1
+        buy_pe_score  += 1
+        reasons_ce.append(f"India VIX {india_vix:.1f} low — directional ok")
+        reasons_pe.append(f"India VIX {india_vix:.1f} low — directional ok")
+    elif india_vix > 22:
+        straddle_score += 2
+        reasons_str.append(f"India VIX {india_vix:.1f} elevated — straddle/hedge preferred")
+
     # ── Determine direction ───────────────────────────────────────────────────
     # Opening range = no trade regardless of score
     if session in ("OPENING", "PRE_MARKET", "CLOSED"):
         return NiftySignal(
-            action="WAIT", strength="WAIT", score=0,
+            action="WAIT", strength="WAIT", score=0, max_score=24,
             spot=spot, atm_strike=atm, expiry=expiry, pcr=pcr,
             atm_iv=atm_iv, vwap=vwap, ema9_15m=ema9 or 0, ema21_15m=ema21 or 0,
             trend_15m=trend_15m or "NEUTRAL", session=session,
@@ -453,7 +508,7 @@ def analyze_nifty() -> NiftySignal:
     rr = round(target_pts / sl_pts, 1) if sl_pts else 0.0
 
     return NiftySignal(
-        action=best_dir, strength=strength, score=best_score, max_score=20,
+        action=best_dir, strength=strength, score=best_score, max_score=24,
         spot=spot, atm_strike=atm, expiry=expiry,
         entry_ce=ce_ltp, entry_pe=pe_ltp,
         sl_pts=sl_pts, sl_spot=sl_spot, target_spot=target_spot, rr=rr,
@@ -470,7 +525,7 @@ if __name__ == "__main__":
     sep = "=" * 60
     print(f"\n{sep}")
     print(f"  NIFTY SIGNAL  [{sig.action}] [{sig.strength}]")
-    print(f"  Score: {sig.score}/{sig.max_score}  Threshold: {TRADE_THRESH}/20")
+    print(f"  Score: {sig.score}/{sig.max_score}  Threshold: {TRADE_THRESH}/24")
     print(sep)
     print(f"  Spot      : {sig.spot:.0f}")
     print(f"  ATM       : {sig.atm_strike}  [{sig.expiry}]")

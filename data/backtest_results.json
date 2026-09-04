@@ -1,0 +1,53 @@
+[
+  {
+    "strategy": "XAUUSD Simple (VWAP+EMA+RSI) [1H 2yr]",
+    "total_trades": 284,
+    "wins": 104,
+    "losses": 171,
+    "timeouts": 9,
+    "win_rate": 36.6,
+    "gross_pnl": 41894.77,
+    "profit_factor": 1.22,
+    "max_drawdown": 15.0,
+    "sharpe_ratio": 1.65,
+    "avg_win": 1977.95,
+    "avg_loss": -987.1,
+    "expectancy": 98.69,
+    "final_capital": 141894.77,
+    "return_pct": 41.9
+  },
+  {
+    "strategy": "XAUUSD OF (SMC vectorized) [1H 1yr]",
+    "total_trades": 341,
+    "wins": 138,
+    "losses": 183,
+    "timeouts": 20,
+    "win_rate": 40.5,
+    "gross_pnl": 56557.89,
+    "profit_factor": 1.26,
+    "max_drawdown": 8.7,
+    "sharpe_ratio": 2.08,
+    "avg_win": 1637.44,
+    "avg_loss": -983.3,
+    "expectancy": 77.29,
+    "final_capital": 156557.89,
+    "return_pct": 56.6
+  },
+  {
+    "strategy": "Nifty Intraday (VWAP+EMA+RSI+VIX) [15m 60d]",
+    "total_trades": 109,
+    "wins": 23,
+    "losses": 66,
+    "timeouts": 20,
+    "win_rate": 21.1,
+    "gross_pnl": -16868.21,
+    "profit_factor": 0.59,
+    "max_drawdown": 19.0,
+    "sharpe_ratio": -2.23,
+    "avg_win": 1647.53,
+    "avg_loss": -977.54,
+    "expectancy": -423.63,
+    "final_capital": 83131.79,
+    "return_pct": -16.9
+  }
+]
