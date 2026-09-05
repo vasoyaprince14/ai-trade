@@ -45,6 +45,8 @@ _pending_activation: dict | None = None
 
 def _is_market_open() -> bool:
     now = datetime.now(IST)
+    if now.weekday() >= 5:   # Saturday=5, Sunday=6 — NSE closed
+        return False
     mins = now.hour * 60 + now.minute
     open_mins  = MARKET_OPEN_H  * 60 + MARKET_OPEN_M
     close_mins = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M

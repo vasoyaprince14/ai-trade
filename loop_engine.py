@@ -79,8 +79,10 @@ def _keep_services():
 # ── Market hours helpers ──────────────────────────────────────────────────────
 
 def is_market_open() -> bool:
-    now = datetime.now().time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    now = datetime.now()
+    if now.weekday() >= 5:   # Saturday=5, Sunday=6 — NSE closed
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 def is_eod() -> bool:
@@ -249,6 +251,31 @@ def run():
                         logger.debug(f"SHAP error: {se}")
 
                 _print_signal(decision)
+
+                # Save Nifty signal to JSON for XAUUSD dashboard
+                try:
+                    import json as _json
+                    _summary  = tracker.get_market_summary()
+                    _features = tracker.get_model_features()
+                    _sig_data = {
+                        "action":     decision.action,
+                        "strike":     getattr(decision, "strike", 0),
+                        "entry":      getattr(decision, "entry", 0),
+                        "stop_loss":  getattr(decision, "stop_loss", 0),
+                        "target":     getattr(decision, "target", 0),
+                        "confidence": float(getattr(decision, "confidence", 0)),
+                        "spot":       _summary.get("spot", 0),
+                        "pcr":        _summary.get("pcr", 0),
+                        "expiry":     _summary.get("expiry", ""),
+                        "vix":        _features.get("f_vix", 0),
+                        "tape_bias":  _features.get("f_tape_bias", 0),
+                        "symbol":     SYMBOL,
+                        "timestamp":  datetime.now().isoformat(),
+                    }
+                    with open("/tmp/nifty_signal.json", "w") as _f:
+                        _json.dump(_sig_data, _f)
+                except Exception as _je:
+                    logger.debug(f"Nifty JSON save error: {_je}")
 
                 # Telegram alert on new actionable signal
                 if decision.action != last_signal_action and decision.is_trade():
