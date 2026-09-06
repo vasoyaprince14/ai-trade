@@ -86,8 +86,10 @@ def is_market_open() -> bool:
 
 
 def is_eod() -> bool:
-    now = datetime.now().time()
-    return EOD_RETRAIN <= now <= dtime(16, 0)
+    now = datetime.now()
+    if now.weekday() >= 5:   # no retrain on weekends
+        return False
+    return EOD_RETRAIN <= now.time() <= dtime(16, 0)
 
 
 # ── Outcome recorder ─────────────────────────────────────────────────────────

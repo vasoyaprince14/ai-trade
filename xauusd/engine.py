@@ -33,6 +33,22 @@ POLL_SECS        = 60
 DIVIDER          = "=" * 50
 SIGNAL_COOLDOWN  = 900    # 15 min — don't resend same direction unless entry moves > ATR*0.5
 ACTIVATION_PTS   = 2.0    # $2 move in trade direction to confirm entry
+
+# Gold futures market hours (COMEX):
+#   Opens Sunday ~22:00 UTC | Closes Friday ~21:00 UTC
+#   Daily maintenance break: 21:00–22:00 UTC every weekday
+#   Closed: Saturday all day + Sunday before 22:00 UTC
+def _gold_market_open() -> bool:
+    now = datetime.now(timezone.utc)
+    wd  = now.weekday()       # Mon=0 … Sat=5, Sun=6
+    hr  = now.hour
+    if wd == 5:               # Saturday — fully closed
+        return False
+    if wd == 6 and hr < 22:  # Sunday before 22:00 UTC — closed
+        return False
+    if hr == 21:              # daily maintenance break 21:00–22:00 UTC
+        return False
+    return True
 TRADE_LOG_PATH   = ROOT / "data" / "xauusd_trades.json"
 HIST_PATH        = "/tmp/xauusd_history.json"
 SIG_PATH         = "/tmp/xauusd_signal.json"
@@ -229,6 +245,12 @@ def run(once: bool = False):
     while True:
         now_ts = time.time()
 
+        if not _gold_market_open() and not once:
+            now_utc = datetime.now(timezone.utc)
+            print(f"\r  Gold market closed — {now_utc.strftime('%a %H:%M UTC')}   ", end="", flush=True)
+            time.sleep(30)
+            continue
+
         if now_ts - last_poll >= POLL_SECS or once:
             last_poll = now_ts
             try:
@@ -301,6 +323,9 @@ def run(once: bool = False):
                             )
 
                     if should_alert:
+                        # Patch entry with live price so alert shows real price, not stale bar
+                        if current_price > 0:
+                            signal.entry = current_price
                         logger.info(f"*** NEW SIGNAL: {signal.action} @ ${signal.entry:.2f} score={signal.score} ***")
                         _telegram(signal.telegram_html())
                         last_signal_ts = now_ts

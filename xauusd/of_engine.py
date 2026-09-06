@@ -29,6 +29,19 @@ from loguru import logger
 POLL_INTERVAL   = 300      # seconds between full analyses (5 min)
 SIGNAL_COOLDOWN = 900      # 15 min between same-direction alerts
 ACTIVATION_PTS  = 2.0     # $2 move in trade direction to confirm entry
+
+# Gold futures closed: Saturday all day + Sunday before 22:00 UTC + 21:00–22:00 daily maintenance
+def _gold_market_open() -> bool:
+    now = datetime.now(timezone.utc)
+    wd  = now.weekday()
+    hr  = now.hour
+    if wd == 5:
+        return False
+    if wd == 6 and hr < 22:
+        return False
+    if hr == 21:
+        return False
+    return True
 SIG_FILE        = "/tmp/xauusd_of_signal.json"
 HISTORY_FILE    = ROOT / "data" / "xauusd_of_trades.json"
 MAX_HISTORY     = 200
@@ -168,6 +181,12 @@ def run(once: bool = False):
     print("=" * 60)
 
     while True:
+        if not _gold_market_open() and not once:
+            now_utc = datetime.now(timezone.utc)
+            print(f"\r  Gold market closed — {now_utc.strftime('%a %H:%M UTC')}   ", end="", flush=True)
+            time.sleep(30)
+            continue
+
         try:
             logger.info("[OF-Engine] Fetching multi-timeframe data (5m/15m/1H/4H)...")
             df_5m  = _fetch("5m",  "3d")
