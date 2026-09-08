@@ -266,6 +266,10 @@ def run(once: bool = False):
             })
             _save_history()
 
+            # Clear stale pending activation when signal drops to WAIT
+            if sig.action == "WAIT":
+                _pending_activation = None
+
             # Check if a pending signal has been activated
             activation_msg = _check_activation(sig.spot)
             if activation_msg:

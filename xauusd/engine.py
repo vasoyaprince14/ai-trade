@@ -323,9 +323,12 @@ def run(once: bool = False):
                             )
 
                     if should_alert:
-                        # Patch entry with live price so alert shows real price, not stale bar
-                        if current_price > 0:
-                            signal.entry = current_price
+                        # Shift entry/SL/TP to live price (stale bar close can be $30-40 off)
+                        if current_price > 0 and signal.is_trade():
+                            delta          = signal.entry - current_price
+                            signal.entry   = current_price
+                            signal.stop_loss -= delta
+                            signal.target    -= delta
                         logger.info(f"*** NEW SIGNAL: {signal.action} @ ${signal.entry:.2f} score={signal.score} ***")
                         _telegram(signal.telegram_html())
                         last_signal_ts = now_ts

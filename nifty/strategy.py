@@ -249,6 +249,21 @@ def analyze_nifty() -> NiftySignal:
 
     nse = _get_nse_data()
     spot     = nse["spot"]
+
+    # Override spot with nsepython live price if available (no yfinance delay)
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "vendors" / "nsepython"))
+        from nsepython import nse_optionchain_scrapper as _oc
+        _data = _oc("NIFTY")
+        _uv   = _data["records"]["data"][0].get("underlyingValue", 0) if _data else 0
+        if _uv and float(_uv) > 1000:
+            spot = float(_uv)
+            if not atm:
+                atm = int(round(spot / 50) * 50)
+            logger.debug(f"[Nifty] Live spot from nsepython: {spot}")
+    except Exception:
+        pass
     pcr      = nse["pcr"]
     atm      = nse["atm_strike"]
     atm_iv   = nse["atm_iv"]
@@ -447,17 +462,18 @@ def analyze_nifty() -> NiftySignal:
         reasons_str.append(f"India VIX {india_vix:.1f} elevated — straddle/hedge preferred")
 
     # ── Determine direction ───────────────────────────────────────────────────
-    # Opening range = no trade regardless of score
-    if session in ("OPENING", "PRE_MARKET", "CLOSED"):
+    # PRE_MARKET / CLOSED → always wait
+    if session in ("PRE_MARKET", "CLOSED"):
         return NiftySignal(
             action="WAIT", strength="WAIT", score=0, max_score=24,
             spot=spot, atm_strike=atm, expiry=expiry, pcr=pcr,
             atm_iv=atm_iv, vwap=vwap, ema9_15m=ema9 or 0, ema21_15m=ema21 or 0,
             trend_15m=trend_15m or "NEUTRAL", session=session,
             entry_ce=ce_ltp, entry_pe=pe_ltp,
-            reasons=[f"Session: {session} — waiting for mid-session"],
+            reasons=[f"Session: {session} — market closed"],
             timestamp=now_ist,
         )
+    # OPENING — score fully but require STRONG threshold (≥STRONG_THRESH) to trade
 
     best_dir   = "WAIT"
     best_score = 0
@@ -484,6 +500,11 @@ def analyze_nifty() -> NiftySignal:
     strength = "WAIT"
     if best_dir != "WAIT":
         strength = "STRONG" if best_score >= STRONG_THRESH else "MODERATE"
+
+    # OPENING session — only allow STRONG signals; drop MODERATE to WAIT
+    if session == "OPENING" and strength == "MODERATE":
+        best_dir = "WAIT"
+        strength = "WAIT"
 
     # ── Trade levels ──────────────────────────────────────────────────────────
     atr_pts = 0.0
