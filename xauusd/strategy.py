@@ -322,8 +322,48 @@ def analyze(df_15m: pd.DataFrame, df_1h: pd.DataFrame, macro: dict) -> GoldSigna
         _b(h_slope > 0, 1, f"1H EMA21 rising (+{h_slope:.2f})")
         _s(h_slope < 0, 1, f"1H EMA21 falling ({h_slope:.2f})")
 
-    # Asia session — lower threshold (more conservative, need score ≥7)
-    TRADE_THRESHOLD = 7 if session == "ASIA" else 6
+    # 6. Key S/R levels — 1H swing highs/lows + round numbers (0-2 pts)
+    sr_levels = []
+    if len(h) >= 15:
+        for i in range(5, len(h) - 5):
+            hi = float(h["high"].iloc[i])
+            lo = float(h["low"].iloc[i])
+            if hi == h["high"].iloc[i-5:i+6].max():
+                sr_levels.append(hi)
+            if lo == h["low"].iloc[i-5:i+6].min():
+                sr_levels.append(lo)
+    # Round numbers every $25
+    base = round(price / 25) * 25
+    for off in (-50, -25, 0, 25, 50):
+        sr_levels.append(base + off)
+
+    near_sup = max((v for v in sr_levels if v < price - 0.5), default=None)
+    near_res = min((v for v in sr_levels if v > price + 0.5), default=None)
+    dist_sup = (price - near_sup) if near_sup else 999
+    dist_res = (near_res - price) if near_res else 999
+    sr_zone  = atr * 0.5   # within half ATR of level
+
+    if dist_sup <= sr_zone:
+        _b(True, 2, f"Price near support {near_sup:.0f} ({dist_sup:.1f}pt) — high-prob buy zone")
+    elif dist_sup <= atr:
+        _b(True, 1, f"Support {near_sup:.0f} nearby ({dist_sup:.1f}pt)")
+    if dist_res <= sr_zone:
+        _s(True, 2, f"Price near resistance {near_res:.0f} ({dist_res:.1f}pt) — high-prob sell zone")
+    elif dist_res <= atr:
+        _s(True, 1, f"Resistance {near_res:.0f} nearby ({dist_res:.1f}pt)")
+
+    # 7. Price structure — higher highs / lower lows on 15m (0-1 pt)
+    if len(m) >= 10:
+        h10 = m["high"].tail(10).values
+        l10 = m["low"].tail(10).values
+        hh  = h10[-1] > h10[-5] and h10[-5] > h10[-9]   # higher highs
+        ll  = l10[-1] < l10[-5] and l10[-5] < l10[-9]   # lower lows
+        _b(hh, 1, "15m higher highs structure")
+        _s(ll, 1, "15m lower lows structure")
+
+    # Require entry near S/R — if price is mid-range, raise threshold
+    mid_range = dist_sup > atr and dist_res > atr
+    TRADE_THRESHOLD = 8 if session == "ASIA" else (8 if mid_range else 7)
 
     # ── Decision ──────────────────────────────────────────────────────────────
     SL_ATR  = 1.5

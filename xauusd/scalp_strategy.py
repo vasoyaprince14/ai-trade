@@ -32,7 +32,8 @@ TP1_PTS  = 5.0
 TP2_PTS  = 10.0
 MIN_ATR  = 2.0    # ignore signal if 1m ATR < $2 (too flat)
 MAX_ATR  = 25.0   # ignore signal if 1m ATR > $25 (too wild, news spike)
-MIN_VOL_MULT = 1.2  # require current bar vol > 1.2× avg
+MIN_VOL_MULT = 1.3
+KEY_LEVEL_ZONE = 6.0   # pts — price must be within this of a key level
 
 # Session windows (UTC hours)
 LONDON_OPEN, LONDON_CLOSE   = 7,  12
@@ -82,6 +83,68 @@ class ScalpSignal:
             f"💡 {' | '.join(self.reasons[:4])}\n"
             f"⏱ {self.timestamp.strftime('%d %b %H:%M UTC')} [{self.session}]"
         )
+
+
+# ── Key S/R levels ───────────────────────────────────────────────────────────
+def _find_key_levels(df_1m: pd.DataFrame, df_5m: pd.DataFrame, price: float) -> dict:
+    """
+    Find nearby support/resistance from swing pivots, round numbers, session range.
+    Returns nearest_support, nearest_resistance, at_key_level, distance_pts.
+    """
+    levels = []
+
+    # 5m swing highs/lows (5-bar pivot)
+    if df_5m is not None and len(df_5m) >= 15:
+        for i in range(5, len(df_5m) - 5):
+            h = float(df_5m["high"].iloc[i])
+            l = float(df_5m["low"].iloc[i])
+            if h == df_5m["high"].iloc[i-5:i+6].max():
+                levels.append(h)
+            if l == df_5m["low"].iloc[i-5:i+6].min():
+                levels.append(l)
+
+    # Session high/low from last 60 1m bars
+    if len(df_1m) >= 30:
+        levels.append(float(df_1m["high"].tail(60).max()))
+        levels.append(float(df_1m["low"].tail(60).min()))
+
+    # Round numbers every $25
+    base = round(price / 25) * 25
+    for off in (-75, -50, -25, 0, 25, 50, 75):
+        levels.append(base + off)
+
+    supports    = [v for v in levels if v < price - 0.5]
+    resistances = [v for v in levels if v > price + 0.5]
+
+    nearest_sup = max(supports)    if supports    else price - 999
+    nearest_res = min(resistances) if resistances else price + 999
+    dist_sup    = price - nearest_sup
+    dist_res    = nearest_res - price
+    distance    = min(dist_sup, dist_res)
+
+    return {
+        "nearest_support":    round(nearest_sup, 2),
+        "nearest_resistance": round(nearest_res, 2),
+        "dist_support":       round(dist_sup, 2),
+        "dist_resistance":    round(dist_res, 2),
+        "at_key_level":       distance <= KEY_LEVEL_ZONE,
+        "distance_pts":       round(distance, 2),
+    }
+
+
+def _htf_trend(df_5m: pd.DataFrame) -> str:
+    """5m EMA13/34 trend: BULLISH | BEARISH | NEUTRAL."""
+    if df_5m is None or len(df_5m) < 35:
+        return "NEUTRAL"
+    close = df_5m["close"]
+    e13   = close.ewm(span=13, adjust=False).mean().iloc[-1]
+    e34   = close.ewm(span=34, adjust=False).mean().iloc[-1]
+    price = float(close.iloc[-1])
+    if e13 > e34 and price > e13:
+        return "BULLISH"
+    if e13 < e34 and price < e13:
+        return "BEARISH"
+    return "NEUTRAL"
 
 
 # ── Session helper ───────────────────────────────────────────────────────────
@@ -221,6 +284,9 @@ def _score_direction(
         elif not is_buy and ema8 < ema21:
             score += 1; reasons.append("EMA8 < EMA21 (1m bearish)")
 
+    # 10. Counter-trend penalty — hard subtract if HTF disagrees
+    # (htf_trend injected via extra kwarg, handled in analyze_scalp)
+
     return score, reasons
 
 
@@ -278,18 +344,48 @@ def analyze_scalp(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> ScalpSignal:
                 "absorption_side": "", "climax_type": "",
                 "momentum_dir": "MIXED", "tape_speed": "NORMAL"}
 
+    # HTF trend (5m EMA13/34)
+    htf = _htf_trend(df_5m)
+
+    # Key S/R levels
+    kl = _find_key_levels(df_1m, df_5m, price)
+
     # Score both directions
     buy_score,  buy_reasons  = _score_direction("BUY",  tape, vwap, sigma, price, df_1m)
     sell_score, sell_reasons = _score_direction("SELL", tape, vwap, sigma, price, df_1m)
 
-    # Volume confirmation — bonus point
+    # HTF alignment bonus/penalty (±2 pts each direction)
+    if htf == "BULLISH":
+        buy_score  += 2; buy_reasons.append(f"5m trend BULLISH (EMA13>34)")
+        sell_score -= 2
+    elif htf == "BEARISH":
+        sell_score += 2; sell_reasons.append(f"5m trend BEARISH (EMA13<34)")
+        buy_score  -= 2
+
+    # Key level proximity (0-3 pts) — only give to the direction that makes sense
+    if kl["at_key_level"]:
+        d_sup = kl["dist_support"]
+        d_res = kl["dist_resistance"]
+        if d_sup <= KEY_LEVEL_ZONE:
+            pts = 3 if d_sup <= 2.0 else (2 if d_sup <= 4.0 else 1)
+            buy_score += pts
+            buy_reasons.append(f"Near support {kl['nearest_support']:.0f} ({d_sup:.1f}pt away)")
+        if d_res <= KEY_LEVEL_ZONE:
+            pts = 3 if d_res <= 2.0 else (2 if d_res <= 4.0 else 1)
+            sell_score += pts
+            sell_reasons.append(f"Near resistance {kl['nearest_resistance']:.0f} ({d_res:.1f}pt away)")
+
+    # Volume confirmation — directional only (close direction determines side)
     if vol_mult >= MIN_VOL_MULT:
-        buy_reasons.append(f"Vol spike {vol_mult:.1f}×")
-        sell_reasons.append(f"Vol spike {vol_mult:.1f}×")
-        buy_score  += 1
-        sell_score += 1
+        last_close = float(df_1m["close"].iloc[-1])
+        last_open  = float(df_1m["open"].iloc[-1])
+        if last_close > last_open:
+            buy_score += 1; buy_reasons.append(f"Vol spike {vol_mult:.1f}× on green bar")
+        else:
+            sell_score += 1; sell_reasons.append(f"Vol spike {vol_mult:.1f}× on red bar")
 
     # Determine action
+    TRADE_THRESH = 10   # raised from 8 — require stronger confluence
     if buy_score > sell_score and buy_score >= TRADE_THRESH:
         action, score, reasons = "BUY", buy_score, buy_reasons
         signal_type = _classify_signal(tape, vwap_dev, "BUY")
@@ -298,11 +394,14 @@ def analyze_scalp(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> ScalpSignal:
         signal_type = _classify_signal(tape, vwap_dev, "SELL")
     else:
         best = max(buy_score, sell_score)
+        top_reasons = (buy_reasons if buy_score >= sell_score else sell_reasons)[:3]
+        if not kl["at_key_level"]:
+            top_reasons = [f"Not at key level (nearest {kl['distance_pts']:.1f}pt away)"] + top_reasons
         return ScalpSignal(
             action="WAIT", signal_type="LOW_SCORE",
             tape_bias=tape["tape_bias"], buy_pressure=tape["buy_pressure"],
             delta_5m=tape["delta_5m"], vwap=vwap, vwap_dev=vwap_dev,
-            session=session, score=best, timestamp=now,
+            session=session, score=best, reasons=top_reasons, timestamp=now,
         )
 
     # Build levels
