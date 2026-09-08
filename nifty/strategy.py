@@ -148,16 +148,78 @@ def _ema(s: pd.Series, n: int) -> pd.Series:
 
 def _get_nse_data() -> dict:
     """
-    Fetch Nifty spot, PCR, ATM strike, ATM IV and option LTPs from NSE.
+    Fetch Nifty spot, PCR, ATM strike, ATM IV and option LTPs.
+    Priority: Dhan option chain (real data) → NSE scraper (fallback).
     Returns dict with keys: spot, pcr, atm_strike, atm_iv, ce_ltp, pe_ltp,
-                            expiry, ce_oi_atm, pe_oi_atm
+                            expiry, ce_oi_atm, pe_oi_atm, source
     """
     result = {
         "spot": 0.0, "pcr": 1.0, "atm_strike": 0,
         "atm_iv": 15.0, "ce_ltp": 0.0, "pe_ltp": 0.0,
         "expiry": "", "ce_oi_atm": 0, "pe_oi_atm": 0,
         "total_ce_oi": 0, "total_pe_oi": 0,
+        "source": "none",
+        # Extra from Dhan
+        "ce_doi": 0, "pe_doi": 0,
+        "ce_delta": 0.0, "pe_delta": 0.0,
+        "ce_theta": 0.0, "pe_theta": 0.0,
+        "ce_vega": 0.0,  "pe_vega": 0.0,
     }
+
+    # ── Primary: Dhan option chain ────────────────────────────────────────────
+    try:
+        import os
+        if os.getenv("DHAN_CLIENT_ID") and os.getenv("DHAN_ACCESS_TOKEN"):
+            from core.data.dhan_feed import get_dhan_feed
+            feed  = get_dhan_feed()
+            if feed.connected:
+                # Real-time spot from Dhan depth (NIFTY index)
+                depth = feed.get_depth("NIFTY", levels=20)
+                if depth.ltp > 1000:
+                    result["spot"] = depth.ltp
+
+                # Full option chain from Dhan
+                chain = feed.get_option_chain("NIFTY")
+                if chain.strikes and chain.spot:
+                    if not result["spot"]:
+                        result["spot"] = chain.spot
+                    spot = result["spot"]
+                    atm  = int(round(spot / 50) * 50)
+                    result["atm_strike"] = atm
+                    result["expiry"]     = chain.expiry
+
+                    ce_total = pe_total = 0
+                    atm_found = False
+                    for s in chain.strikes:
+                        ce_total += s.get("ce_oi", 0)
+                        pe_total += s.get("pe_oi", 0)
+                        if not atm_found and abs(s["strike"] - atm) < 26:
+                            result["ce_ltp"]    = s.get("ce_ltp", 0)
+                            result["pe_ltp"]    = s.get("pe_ltp", 0)
+                            result["atm_iv"]    = s.get("ce_iv") or s.get("pe_iv") or 15.0
+                            result["ce_oi_atm"] = s.get("ce_oi", 0)
+                            result["pe_oi_atm"] = s.get("pe_oi", 0)
+                            result["ce_doi"]    = s.get("ce_doi", 0)
+                            result["pe_doi"]    = s.get("pe_doi", 0)
+                            result["ce_delta"]  = s.get("ce_delta", 0.0)
+                            result["pe_delta"]  = s.get("pe_delta", 0.0)
+                            result["ce_theta"]  = s.get("ce_theta", 0.0)
+                            result["pe_theta"]  = s.get("pe_theta", 0.0)
+                            result["ce_vega"]   = s.get("ce_vega", 0.0)
+                            result["pe_vega"]   = s.get("pe_vega", 0.0)
+                            atm_found = True
+
+                    result["total_ce_oi"] = ce_total
+                    result["total_pe_oi"] = pe_total
+                    if ce_total:
+                        result["pcr"] = round(pe_total / ce_total, 3)
+                    result["source"] = "dhan"
+                    logger.debug(f"[Nifty] Data from Dhan: spot={spot:.0f} PCR={result['pcr']:.2f} IV={result['atm_iv']:.1f}%")
+                    return result
+    except Exception as e:
+        logger.debug(f"[Nifty] Dhan option chain error: {e} — falling back to NSE")
+
+    # ── Fallback: NSE scraper ─────────────────────────────────────────────────
     try:
         from core.data.nse_scraper import NSEScraper
         sc = NSEScraper()
@@ -179,11 +241,9 @@ def _get_nse_data() -> dict:
         if not data:
             return result
 
-        # ATM strike (round to nearest 50)
         atm = int(round(spot / 50) * 50)
         result["atm_strike"] = atm
 
-        # Total OI for PCR
         ce_total = sum((r.get("CE", {}).get("openInterest") or 0)
                        for r in data if r.get("CE") and r.get("expiryDates") == expiry)
         pe_total = sum((r.get("PE", {}).get("openInterest") or 0)
@@ -193,12 +253,11 @@ def _get_nse_data() -> dict:
         if ce_total:
             result["pcr"] = round(pe_total / ce_total, 3)
 
-        # ATM strike data
         for row in data:
             if row.get("expiryDates") != expiry:
                 continue
             strike = row.get("strikePrice", 0)
-            if abs(int(strike) - atm) < 26:  # within 1 strike
+            if abs(int(strike) - atm) < 26:
                 ce = row.get("CE", {})
                 pe = row.get("PE", {})
                 if ce:
@@ -212,6 +271,7 @@ def _get_nse_data() -> dict:
                     result["pe_oi_atm"] = int(pe.get("openInterest") or 0)
                 break
 
+        result["source"] = "nse"
     except Exception as e:
         logger.warning(f"[Nifty] NSE data error: {e}")
     return result
@@ -250,20 +310,20 @@ def analyze_nifty() -> NiftySignal:
     nse = _get_nse_data()
     spot     = nse["spot"]
 
-    # Override spot with nsepython live price if available (no yfinance delay)
-    try:
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).parent.parent / "vendors" / "nsepython"))
-        from nsepython import nse_optionchain_scrapper as _oc
-        _data = _oc("NIFTY")
-        _uv   = _data["records"]["data"][0].get("underlyingValue", 0) if _data else 0
-        if _uv and float(_uv) > 1000:
-            spot = float(_uv)
-            if not atm:
-                atm = int(round(spot / 50) * 50)
-            logger.debug(f"[Nifty] Live spot from nsepython: {spot}")
-    except Exception:
-        pass
+    # Override spot with nsepython live price if NSE was used (not Dhan)
+    if nse.get("source") != "dhan":
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent.parent / "vendors" / "nsepython"))
+            from nsepython import nse_optionchain_scrapper as _oc
+            _data = _oc("NIFTY")
+            _uv   = _data["records"]["data"][0].get("underlyingValue", 0) if _data else 0
+            if _uv and float(_uv) > 1000:
+                spot = float(_uv)
+                atm  = int(round(spot / 50) * 50)
+                logger.debug(f"[Nifty] Live spot from nsepython: {spot}")
+        except Exception:
+            pass
     pcr      = nse["pcr"]
     atm      = nse["atm_strike"]
     atm_iv   = nse["atm_iv"]

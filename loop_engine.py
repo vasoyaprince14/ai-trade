@@ -60,13 +60,33 @@ def _ensure_running(name: str, cmd: list, log_file: str, check_port: int = 0):
 
 
 def _keep_services():
-    """Ensure dashboard + ngrok are always running."""
+    """Ensure dashboard + signal engines + ngrok are always running."""
     _ensure_running(
         "dashboard",
         [sys.executable, "-m", "streamlit", "run", "dashboard/app.py",
          "--server.port", "8502", "--server.headless", "true"],
         "/tmp/dashboard.log",
         check_port=8502,
+    )
+    _ensure_running(
+        "nifty_engine",
+        [sys.executable, "nifty/engine.py"],
+        "/tmp/nifty_engine.log",
+    )
+    _ensure_running(
+        "nifty_dom_engine",
+        [sys.executable, "nifty/dom_engine.py"],
+        "/tmp/nifty_dom_engine.log",
+    )
+    _ensure_running(
+        "xauusd_engine",
+        [sys.executable, "xauusd/engine.py"],
+        "/tmp/xauusd_engine.log",
+    )
+    _ensure_running(
+        "xauusd_scalp_engine",
+        [sys.executable, "xauusd/scalp_engine.py"],
+        "/tmp/xauusd_scalp_engine.log",
     )
     _ensure_running(
         "ngrok",
