@@ -185,8 +185,14 @@ class OFSignal:
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 def _fetch(interval: str, period: str) -> pd.DataFrame:
-    """Fetch OHLCV for GC=F (Gold Futures) and normalise columns."""
+    """
+    Fetch OHLCV for GC=F (Gold Futures) and normalise columns.
+    For short intervals (1m/5m), appends a synthetic current bar using
+    GLD (gold ETF, ~1 min delay) to reduce the GC=F 10-15 min delay.
+    """
     import yfinance as yf
+    from datetime import datetime, timezone as tz
+
     raw = yf.download("GC=F", period=period, interval=interval,
                       progress=False, auto_adjust=True)
     if raw.empty:
@@ -196,14 +202,44 @@ def _fetch(interval: str, period: str) -> pd.DataFrame:
     else:
         raw.columns = [c.lower() for c in raw.columns]
     raw = raw.reset_index()
-    # Rename index col
     for c in raw.columns:
-        if c.lower() in ("datetime","date"):
+        if c.lower() in ("datetime", "date"):
             raw.rename(columns={c: "timestamp"}, inplace=True)
             break
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
-    raw = raw.dropna(subset=["open","high","low","close"])
-    return raw.sort_values("timestamp").reset_index(drop=True)
+    raw = raw.dropna(subset=["open", "high", "low", "close"])
+    raw = raw.sort_values("timestamp").reset_index(drop=True)
+
+    # For 5m/15m: patch the latest price from GLD to reduce delay
+    if interval in ("5m", "15m", "1m"):
+        try:
+            gld = yf.download("GLD", period="1d", interval="1m",
+                              progress=False, auto_adjust=True)
+            if not gld.empty:
+                gld_px = float(gld["Close"].iloc[-1].values[0]
+                               if hasattr(gld["Close"].iloc[-1], "values")
+                               else gld["Close"].iloc[-1])
+                # Calibrate ratio from most recent overlapping GC=F bar
+                last_gc = float(raw["close"].iloc[-1])
+                last_gld_5m = yf.download("GLD", period="1d", interval="5m",
+                                          progress=False, auto_adjust=True)
+                if not last_gld_5m.empty:
+                    gld_5m_px = float(last_gld_5m["Close"].iloc[-1].values[0]
+                                      if hasattr(last_gld_5m["Close"].iloc[-1], "values")
+                                      else last_gld_5m["Close"].iloc[-1])
+                    ratio = last_gc / gld_5m_px if gld_5m_px > 0 else 11.02
+                else:
+                    ratio = 11.02
+                live_price = round(gld_px * ratio, 2)
+                # Update the last bar's close (and high/low if price moved)
+                raw.loc[raw.index[-1], "close"] = live_price
+                raw.loc[raw.index[-1], "high"]  = max(float(raw.loc[raw.index[-1], "high"]), live_price)
+                raw.loc[raw.index[-1], "low"]   = min(float(raw.loc[raw.index[-1], "low"]),  live_price)
+                logger.debug(f"[_fetch] GLD-patched price: GLD={gld_px:.2f} × {ratio:.4f} = {live_price:.2f}")
+        except Exception as e:
+            logger.debug(f"[_fetch] GLD patch skipped: {e}")
+
+    return raw
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

@@ -146,7 +146,7 @@ tabs = st.tabs([
     "🔬 Order Flow L2", "🛡️ Hedge System",
     "⚡ GEX + IV Surface", "🌐 Regime + Breadth + Sector",
     "🇮🇳 India + News", "🤖 Bull vs Bear", "📋 History",
-    "🏦 FII Tape + DOM", "🧠 OF Strategy"
+    "🏦 FII Tape + DOM", "🧠 OF Strategy", "⚡ Scalping"
 ])
 
 
@@ -3169,3 +3169,430 @@ border:1px solid #2d3250;font-size:0.9rem;'>
 **Trade fires:** ≥ 22/40 (55%) · **STRONG:** ≥ 28/40 (70%)
 **SL:** Below/above OB extreme ±0.3×ATR · **TP1:** 1.5R · **TP2:** 2.5R or key level · **TP3:** 4R
 """)
+
+
+# ══ TAB 13: SCALPING ═════════════════════════════════════════════════════════
+with tabs[12]:
+    st.markdown("""
+<h2 style='margin-bottom:0;'>⚡ Scalping Engine
+<span style='font-size:0.7rem;color:#888;'>1m · Tape + CVD + VWAP + Footprint</span></h2>
+<p style='color:#888;margin-top:4px;font-size:0.9rem;'>
+SL $4 · TP1 $5 (→BE) · TP2 $10 · London 07-12 UTC · NY 13-17 UTC · 30s poll
+</p>
+""", unsafe_allow_html=True)
+
+    # ── load scalp signal JSON ─────────────────────────────────────────────
+    _scalp_sig = None
+    try:
+        with open("/tmp/xauusd_scalp_signal.json") as _f:
+            _scalp_sig = json.load(_f)
+    except Exception:
+        pass
+
+    # ── refresh button ─────────────────────────────────────────────────────
+    _sr1, _sr2 = st.columns([1, 5])
+    with _sr1:
+        if st.button("🔄 Refresh", key="scalp_refresh"):
+            st.rerun()
+
+    # ── top metric row ─────────────────────────────────────────────────────
+    _sc1, _sc2, _sc3, _sc4, _sc5, _sc6 = st.columns(6)
+    _s_action  = (_scalp_sig or {}).get("action", "WAIT")
+    _s_entry   = (_scalp_sig or {}).get("entry", 0)
+    _s_sl      = (_scalp_sig or {}).get("sl", 0)
+    _s_tp2     = (_scalp_sig or {}).get("tp2", 0)
+    _s_tape    = (_scalp_sig or {}).get("tape_bias", "—")
+    _s_buy_pct = (_scalp_sig or {}).get("buy_pressure", 0)
+    _s_d5      = (_scalp_sig or {}).get("delta_5m", 0)
+    _s_vdev    = (_scalp_sig or {}).get("vwap_dev", 0)
+    _s_score   = (_scalp_sig or {}).get("score", 0)
+    _s_session = (_scalp_sig or {}).get("session", "—")
+    _s_type    = (_scalp_sig or {}).get("signal_type", "—")
+
+    _action_color = {"BUY": "#00ff88", "SELL": "#ff4444"}.get(_s_action, "#ffa500")
+    with _sc1:
+        st.markdown(f"<div style='background:#111;padding:10px;border-radius:8px;border:1px solid {_action_color};text-align:center'>"
+                    f"<div style='color:{_action_color};font-size:1.4rem;font-weight:bold;'>{_s_action}</div>"
+                    f"<div style='color:#888;font-size:0.75rem;'>{_s_type}</div></div>", unsafe_allow_html=True)
+    with _sc2:
+        st.metric("Entry", f"${_s_entry:.2f}" if _s_entry else "—")
+    with _sc3:
+        st.metric("SL / TP2", f"${_s_sl:.2f} / ${_s_tp2:.2f}" if _s_sl else "—")
+    with _sc4:
+        st.metric("Tape Bias", _s_tape)
+    with _sc5:
+        st.metric("Buy Pressure", f"{_s_buy_pct:.0f}%")
+    with _sc6:
+        st.metric("Score / Session", f"{_s_score} | {_s_session}")
+
+    st.divider()
+
+    # ── fetch 1m data ──────────────────────────────────────────────────────
+    @st.cache_data(ttl=30)
+    def _scalp_get_1m():
+        try:
+            from xauusd.data import get_bars, get_price
+            df = get_bars("1m", "1d")
+            px = get_price()
+            if not df.empty and px > 0:
+                df.loc[df.index[-1], "close"] = px
+                df.loc[df.index[-1], "high"]  = max(df["high"].iloc[-1], px)
+                df.loc[df.index[-1], "low"]   = min(df["low"].iloc[-1],  px)
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    _df1m = _scalp_get_1m()
+
+    # ── compute tape + CVD ─────────────────────────────────────────────────
+    _tape_data = {}
+    if not _df1m.empty and len(_df1m) >= 20:
+        try:
+            from xauusd.tape_reader import analyze_tape
+            _tape_data = analyze_tape(_df1m)
+        except Exception:
+            pass
+
+    # ── compute footprint (delta per bar) ─────────────────────────────────
+    def _compute_footprint(df: pd.DataFrame) -> pd.DataFrame:
+        """Approximate buy/sell delta per bar from OHLCV."""
+        d = df.copy()
+        rng = (d["high"] - d["low"]).replace(0, 0.001)
+        d["buy_vol"]  = ((d["close"] - d["low"])  / rng) * d["volume"]
+        d["sell_vol"] = ((d["high"]  - d["close"]) / rng) * d["volume"]
+        d["delta"]    = d["buy_vol"] - d["sell_vol"]
+        d["cvd"]      = d["delta"].cumsum()
+        return d
+
+    # ── compute VWAP + bands ───────────────────────────────────────────────
+    def _compute_vwap_db(df: pd.DataFrame) -> pd.DataFrame:
+        d = df.copy()
+        d["tp"]       = (d["high"] + d["low"] + d["close"]) / 3
+        d["pvol"]     = d["tp"] * d["volume"]
+        d["cum_pvol"] = d["pvol"].cumsum()
+        d["cum_vol"]  = d["volume"].cumsum().replace(0, float("nan"))
+        d["vwap"]     = d["cum_pvol"] / d["cum_vol"]
+        var = ((d["tp"] - d["vwap"]) ** 2 * d["volume"]).cumsum() / d["cum_vol"]
+        d["sigma"]    = var.pow(0.5).fillna(0)
+        d["vwap_u1"]  = d["vwap"] + d["sigma"]
+        d["vwap_d1"]  = d["vwap"] - d["sigma"]
+        d["vwap_u2"]  = d["vwap"] + 2 * d["sigma"]
+        d["vwap_d2"]  = d["vwap"] - 2 * d["sigma"]
+        return d
+
+    if not _df1m.empty and len(_df1m) >= 20:
+        _fp  = _compute_footprint(_df1m)
+        _vwp = _compute_vwap_db(_df1m)
+
+        # show last 60 bars
+        N    = min(60, len(_df1m))
+        _fp  = _fp.tail(N)
+        _vwp = _vwp.tail(N)
+        _idx = list(range(len(_fp)))
+        _times = [str(t)[:16] for t in _fp.index]
+
+        # ── main chart: candles + VWAP + EMA + footprint delta ────────────
+        from plotly.subplots import make_subplots
+        import plotly.graph_objects as go
+
+        _ema8  = _df1m["close"].ewm(span=8,  adjust=False).mean().tail(N)
+        _ema21 = _df1m["close"].ewm(span=21, adjust=False).mean().tail(N)
+
+        _fig = make_subplots(
+            rows=3, cols=1,
+            row_heights=[0.55, 0.25, 0.20],
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            subplot_titles=["1m Candles + VWAP Bands", "CVD (Cumulative Volume Delta)", "Bar Delta (Footprint Approx)"]
+        )
+
+        # Candles
+        _fig.add_trace(go.Candlestick(
+            x=_times, open=_fp["open"], high=_fp["high"],
+            low=_fp["low"], close=_fp["close"],
+            name="XAUUSD 1m", increasing_line_color="#00d4aa",
+            decreasing_line_color="#ff4b4b"
+        ), row=1, col=1)
+
+        # VWAP lines
+        _fig.add_trace(go.Scatter(x=_times, y=_vwp["vwap"].values,
+            name="VWAP", line=dict(color="#fff700", width=1.5)), row=1, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=_vwp["vwap_u1"].values,
+            name="+1σ", line=dict(color="#4488ff", width=1, dash="dot")), row=1, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=_vwp["vwap_d1"].values,
+            name="-1σ", line=dict(color="#4488ff", width=1, dash="dot")), row=1, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=_vwp["vwap_u2"].values,
+            name="+2σ", line=dict(color="#ff88aa", width=1, dash="dash")), row=1, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=_vwp["vwap_d2"].values,
+            name="-2σ", line=dict(color="#ff88aa", width=1, dash="dash")), row=1, col=1)
+
+        # EMA 8/21
+        _fig.add_trace(go.Scatter(x=_times, y=_ema8.values,
+            name="EMA8", line=dict(color="#ff9900", width=1)), row=1, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=_ema21.values,
+            name="EMA21", line=dict(color="#aa44ff", width=1)), row=1, col=1)
+
+        # Signal level lines
+        if _s_entry:
+            _fig.add_hline(y=_s_entry, line_color=_action_color,
+                           line_dash="solid", line_width=1.5,
+                           annotation_text=f"Entry ${_s_entry:.2f}", row=1, col=1)
+        if _s_sl:
+            _fig.add_hline(y=_s_sl, line_color="#ff4444",
+                           line_dash="dot", annotation_text=f"SL ${_s_sl:.2f}", row=1, col=1)
+        if _s_tp2:
+            _fig.add_hline(y=_s_tp2, line_color="#00ff88",
+                           line_dash="dot", annotation_text=f"TP2 ${_s_tp2:.2f}", row=1, col=1)
+
+        # CVD
+        _cvd_colors = ["#00d4aa" if v >= 0 else "#ff4b4b" for v in _fp["cvd"].values]
+        _fig.add_trace(go.Bar(x=_times, y=_fp["cvd"].values,
+            name="CVD", marker_color=_cvd_colors, opacity=0.8), row=2, col=1)
+        _fig.add_trace(go.Scatter(x=_times, y=[0]*N,
+            line=dict(color="#666", width=0.5), showlegend=False), row=2, col=1)
+
+        # Delta footprint bars
+        _delta_colors = ["#00d4aa" if v >= 0 else "#ff4b4b" for v in _fp["delta"].values]
+        _fig.add_trace(go.Bar(x=_times, y=_fp["delta"].values,
+            name="Bar Δ", marker_color=_delta_colors, opacity=0.85), row=3, col=1)
+
+        _fig.update_layout(
+            height=720, template="plotly_dark",
+            showlegend=True,
+            legend=dict(orientation="h", y=1.02, x=0),
+            xaxis_rangeslider_visible=False,
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        _fig.update_xaxis(showgrid=False)
+        _fig.update_yaxis(showgrid=True, gridcolor="#1e2130")
+        st.plotly_chart(_fig, use_container_width=True)
+
+        # ── Volume Profile Heatmap ─────────────────────────────────────────
+        st.markdown("#### 📊 Volume Profile (Price Heatmap)")
+        try:
+            _vp_df = _df1m.tail(120).copy()
+            _price_min = float(_vp_df["low"].min())
+            _price_max = float(_vp_df["high"].max())
+            _bins = 40
+            _edges = pd.np.linspace(_price_min, _price_max, _bins + 1) \
+                     if hasattr(pd, "np") else \
+                     [_price_min + i * (_price_max - _price_min) / _bins for i in range(_bins + 1)]
+            import numpy as _np
+            _edges = _np.linspace(_price_min, _price_max, _bins + 1)
+            _vol_dist = _np.zeros(_bins)
+            _delta_dist = _np.zeros(_bins)
+            for _, _row in _vp_df.iterrows():
+                _lo, _hi = float(_row["low"]), float(_row["high"])
+                _vol = float(_row.get("volume", 0) or 0)
+                _dlt = float((_fp["delta"].get(_row.name, 0)) if hasattr(_fp["delta"], "get") else 0)
+                _mask = (_edges[1:] >= _lo) & (_edges[:-1] <= _hi)
+                _n = _mask.sum()
+                if _n > 0:
+                    _vol_dist[_mask]   += _vol / _n
+                    _delta_dist[_mask] += _dlt / _n
+            _mid_prices = (_edges[:-1] + _edges[1:]) / 2
+            _poc_idx    = int(_np.argmax(_vol_dist))
+            _poc_price  = _mid_prices[_poc_idx]
+
+            _vp_fig = go.Figure()
+            _vp_colors = [
+                f"rgba({int(255*(1-v/max(_vol_dist.max(),1)))}, {int(180*v/max(_vol_dist.max(),1))}, 255, 0.8)"
+                for v in _vol_dist
+            ]
+            _vp_fig.add_trace(go.Bar(
+                x=_vol_dist, y=_mid_prices,
+                orientation="h", name="Volume",
+                marker_color=_vp_colors,
+                width=(_price_max - _price_min) / _bins * 0.9,
+            ))
+            _cur_px = float(_df1m["close"].iloc[-1])
+            _vp_fig.add_hline(y=_cur_px, line_color="#fff700", line_width=1.5,
+                               annotation_text=f"Price ${_cur_px:.2f}")
+            _vp_fig.add_hline(y=_poc_price, line_color="#ff9900", line_width=1,
+                               line_dash="dot", annotation_text=f"POC ${_poc_price:.2f}")
+            _vp_fig.update_layout(
+                height=350, template="plotly_dark",
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="Volume", yaxis_title="Price",
+                showlegend=False,
+            )
+            st.plotly_chart(_vp_fig, use_container_width=True)
+            st.caption(f"POC (Point of Control): **${_poc_price:.2f}** — highest volume price level in last 2 hrs")
+        except Exception as _ve:
+            st.warning(f"Volume profile error: {_ve}")
+
+    else:
+        st.info("Waiting for 1m bar data... (market may be closed)")
+
+    st.divider()
+
+    # ── Tape reading details ───────────────────────────────────────────────
+    st.markdown("#### 🌊 Tape Reading Details")
+    if _tape_data:
+        _t1, _t2, _t3, _t4 = st.columns(4)
+        _t1.metric("Tape Bias",    _tape_data.get("tape_bias", "—"))
+        _t2.metric("Buy Pressure", f"{_tape_data.get('buy_pressure', 0):.1f}%")
+        _t3.metric("Delta 5m",     f"{_tape_data.get('delta_5m', 0):+.0f}")
+        _t4.metric("Delta 15m",    f"{_tape_data.get('delta_15m', 0):+.0f}")
+
+        _t5, _t6, _t7, _t8 = st.columns(4)
+        _t5.metric("Tape Speed",     _tape_data.get("tape_speed", "—"))
+        _t6.metric("Momentum",       f"{_tape_data.get('momentum_dir','—')} {_tape_data.get('momentum_bars',0)}bars")
+        _t7.metric("Absorption",     "YES" if _tape_data.get("absorption") else "no")
+        _t8.metric("Climax",         _tape_data.get("climax_type", "none") if _tape_data.get("climax") else "none")
+
+        _events = _tape_data.get("tape_events", [])
+        if _events:
+            st.markdown("**Tape Events (latest):**")
+            for _ev in _events[-8:]:
+                _ev_color = "#00ff88" if any(w in _ev.upper() for w in ["BULL","BUY","GREEN","ACCUM"]) \
+                            else "#ff4444" if any(w in _ev.upper() for w in ["SELL","BEAR","RED","DIST"]) \
+                            else "#ffa500"
+                st.markdown(f"<span style='color:{_ev_color}'>▶ {_ev}</span>", unsafe_allow_html=True)
+
+        _large_prints = _tape_data.get("large_prints", [])
+        if _large_prints:
+            st.markdown(f"**Large Prints ({len(_large_prints)} detected):**")
+            _lp_df = pd.DataFrame(_large_prints[:10])
+            if "price" in _lp_df.columns:
+                _lp_df["price"] = _lp_df["price"].apply(lambda x: f"${x:.2f}")
+            st.dataframe(_lp_df, use_container_width=True, height=180)
+    else:
+        st.info("No tape data yet — engine needs to run at least one tick.")
+
+    st.divider()
+
+    # ── Scalp trade history & P&L ──────────────────────────────────────────
+    st.markdown("#### 📋 Scalp Trade History")
+    _hist_path = ROOT / "data" / "xauusd_scalp_trades.json"
+    _scalp_hist = []
+    try:
+        if _hist_path.exists():
+            _scalp_hist = json.loads(_hist_path.read_text())
+    except Exception:
+        pass
+
+    if _scalp_hist:
+        _sh = pd.DataFrame(_scalp_hist)
+        _wins   = len(_sh[_sh["outcome"].isin(["TP1","TP2"])])
+        _losses = len(_sh[_sh["outcome"] == "SL"])
+        _total  = len(_sh)
+        _wr     = round(_wins / _total * 100, 1) if _total else 0
+        _pnl    = _sh["pnl_pts"].sum() if "pnl_pts" in _sh.columns else 0
+
+        _ps1, _ps2, _ps3, _ps4 = st.columns(4)
+        _ps1.metric("Total Trades", _total)
+        _ps2.metric("Win Rate",     f"{_wr}%")
+        _ps3.metric("Total P&L",    f"{_pnl:+.1f} pts")
+        _ps4.metric("Wins / Losses", f"{_wins} / {_losses}")
+
+        # P&L equity curve
+        if "pnl_pts" in _sh.columns:
+            _sh["equity"] = _sh["pnl_pts"].cumsum()
+            _eq_fig = go.Figure(go.Scatter(
+                x=list(range(len(_sh))), y=_sh["equity"].values,
+                fill="tozeroy",
+                line=dict(color="#00d4aa" if _pnl >= 0 else "#ff4444"),
+                name="Equity"
+            ))
+            _eq_fig.update_layout(
+                height=200, template="plotly_dark",
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="Trade #", yaxis_title="Cumulative P&L (pts)",
+            )
+            st.plotly_chart(_eq_fig, use_container_width=True)
+
+        st.dataframe(
+            _sh[["open_ts","direction","entry","close_px","outcome","pnl_pts","signal_type","session"]].tail(30),
+            use_container_width=True, height=300
+        )
+    else:
+        st.info("No scalp trades recorded yet. Trades appear here after TP/SL hits.")
+
+    st.divider()
+
+    # ── Backtest ───────────────────────────────────────────────────────────
+    st.markdown("#### 🧪 Scalp Strategy Backtest")
+    st.caption("Runs on historical 1m bars (last 5 days). Uses same scoring logic as live engine.")
+
+    if st.button("▶ Run Scalp Backtest", key="run_scalp_bt"):
+        with st.spinner("Running backtest on 1m bars..."):
+            try:
+                import subprocess, sys as _sys
+                _bt_result = subprocess.run(
+                    [_sys.executable, "backtest/scalp_backtest.py"],
+                    capture_output=True, text=True, timeout=120,
+                    cwd=str(ROOT)
+                )
+                _bt_out = _bt_result.stdout + _bt_result.stderr
+                # Load results
+                _bt_file = ROOT / "data" / "scalp_backtest_results.json"
+                if _bt_file.exists():
+                    _bt = json.loads(_bt_file.read_text())
+                    _br1, _br2, _br3, _br4, _br5 = st.columns(5)
+                    _br1.metric("Trades",    _bt.get("trades", 0))
+                    _br2.metric("Win Rate",  f"{_bt.get('wr', 0):.1f}%")
+                    _br3.metric("Total P&L", f"{_bt.get('total_pnl', 0):+.1f} pts")
+                    _br4.metric("Avg Win",   f"{_bt.get('avg_win', 0):+.2f}")
+                    _br5.metric("Avg Loss",  f"{_bt.get('avg_loss', 0):+.2f}")
+                    if "equity_curve" in _bt:
+                        _bt_eq = go.Figure(go.Scatter(
+                            y=_bt["equity_curve"], fill="tozeroy",
+                            line=dict(color="#00d4aa" if _bt.get("total_pnl",0)>=0 else "#ff4444"),
+                        ))
+                        _bt_eq.update_layout(
+                            height=220, template="plotly_dark",
+                            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                            margin=dict(l=0, r=0, t=5, b=0),
+                            xaxis_title="Trade #", yaxis_title="P&L (pts)",
+                        )
+                        st.plotly_chart(_bt_eq, use_container_width=True)
+                    if "trades" in _bt and isinstance(_bt["trades"], list):
+                        st.dataframe(pd.DataFrame(_bt["trades"]).tail(30), use_container_width=True, height=250)
+                else:
+                    st.code(_bt_out[-2000:] if _bt_out else "No output")
+            except subprocess.TimeoutExpired:
+                st.error("Backtest timed out (>2 min)")
+            except Exception as _bte:
+                st.error(f"Backtest error: {_bte}")
+
+    # ── How it works ───────────────────────────────────────────────────────
+    with st.expander("📖 How Tape Reading & Order Flow Works"):
+        st.markdown("""
+### How We Read the Tape (No L1/L2 access needed)
+
+**Real tape reading** watches every trade print: `price | size | side | time`.
+Without tick data, we *approximate* from OHLCV using physics of price action:
+
+| Signal | Calculation | What it means |
+|--------|------------|---------------|
+| **Buy Volume** | `(close - low) / (high - low) × volume` | Bars closing near high = buyers winning |
+| **Sell Volume** | `(high - close) / (high - low) × volume` | Bars closing near low = sellers winning |
+| **CVD** | cumsum(buy_vol - sell_vol) | Rising CVD = net buying pressure building |
+| **Absorption** | large volume + tiny range (< 0.15% body) | Institution absorbing opposite side |
+| **Climax** | volume > 3× avg + reversal body | Panic buyers/sellers = exhaustion |
+| **Iceberg** | same price tested 3+ times | Hidden large resting order |
+| **Stacking** | 3+ consecutive same-direction bars | Momentum building, trend continuation |
+| **VWAP dev** | (price - VWAP) / σ | ±1σ = mean-reversion zone, ±2σ = extreme |
+
+### Footprint Approximation
+Each bar's **delta** (buy vol - sell vol) is shown in the bottom chart.
+- 🟢 Green bar = net buying in that minute
+- 🔴 Red bar = net selling in that minute
+- CVD = cumulative sum → shows if buyers or sellers are *accumulating* pressure
+
+### True Footprint (real tick data) would show:
+- Volume at every bid/ask price level inside each bar
+- Exact aggressor side (who crossed the spread)
+- Order book depth changes
+
+### Why our approximation works:
+Gold (GLD) institutional orders leave **absorption** and **climax** fingerprints
+that are visible on 1m OHLCV even without tick data. The key patterns:
+- Price moves to a level → volume spikes → price doesn't move → **absorption**
+- Price moves fast → volume extreme → reversal → **climax/exhaustion**
+""")
+
