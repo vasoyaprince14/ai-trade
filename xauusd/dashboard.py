@@ -146,7 +146,8 @@ tabs = st.tabs([
     "🔬 Order Flow L2", "🛡️ Hedge System",
     "⚡ GEX + IV Surface", "🌐 Regime + Breadth + Sector",
     "🇮🇳 India + News", "🤖 Bull vs Bear", "📋 History",
-    "🏦 FII Tape + DOM", "🧠 OF Strategy", "⚡ Scalping"
+    "🏦 FII Tape + DOM", "🧠 OF Strategy", "⚡ Scalping",
+    "📖 Nifty DOM"
 ])
 
 
@@ -3595,4 +3596,288 @@ that are visible on 1m OHLCV even without tick data. The key patterns:
 - Price moves to a level → volume spikes → price doesn't move → **absorption**
 - Price moves fast → volume extreme → reversal → **climax/exhaustion**
 """)
+
+
+# ══ TAB 14: NIFTY DOM ════════════════════════════════════════════════════════
+with tabs[13]:
+    st.markdown("""
+<h2 style='margin-bottom:0;'>📖 Nifty DOM — Real Order Book Strategy
+<span style='font-size:0.7rem;color:#888;'>Dhan 20-level depth · 30s poll</span></h2>
+<p style='color:#888;margin-top:4px;font-size:0.9rem;'>
+Book imbalance · Order walls · OI flow · Spoof filter · 09:15–15:30 IST
+</p>
+""", unsafe_allow_html=True)
+
+    _dom = None
+    try:
+        with open("/tmp/nifty_dom_signal.json") as _f:
+            _dom = json.load(_f)
+    except Exception:
+        pass
+
+    _db1, _db2, _db3 = st.columns([1, 1, 5])
+    with _db1:
+        _dom_scan = st.button("▶ Scan DOM Now", key="dom_scan", type="primary")
+    with _db2:
+        if st.button("🔄 Refresh", key="dom_refresh"):
+            st.rerun()
+
+    if _dom_scan:
+        with st.spinner("Fetching Dhan 20-level order book…"):
+            try:
+                import nifty.dom_strategy as _ds_mod
+                _orig_sess_fn = _ds_mod._get_session
+                _ds_mod._get_session = lambda _: "MID_SESSION"
+                _dsig = _ds_mod.analyze_dom()
+                _ds_mod._get_session = _orig_sess_fn
+                _dom = {
+                    "action": _dsig.action, "strength": _dsig.strength,
+                    "score": _dsig.score, "max_score": _dsig.max_score,
+                    "spot": _dsig.spot, "atm_strike": _dsig.atm_strike,
+                    "expiry": _dsig.expiry, "entry_ce": _dsig.entry_ce,
+                    "entry_pe": _dsig.entry_pe, "sl_pts": _dsig.sl_pts,
+                    "sl_spot": _dsig.sl_spot, "target_spot": _dsig.target_spot,
+                    "rr": _dsig.rr, "book_imbalance": _dsig.book_imbalance,
+                    "order_imbalance": _dsig.order_imbalance,
+                    "bid_qty_5": _dsig.bid_qty_5, "ask_qty_5": _dsig.ask_qty_5,
+                    "spread": _dsig.spread, "bid_wall_price": _dsig.bid_wall_price,
+                    "bid_wall_qty": _dsig.bid_wall_qty, "ask_wall_price": _dsig.ask_wall_price,
+                    "ask_wall_qty": _dsig.ask_wall_qty, "ce_doi": _dsig.ce_doi,
+                    "pe_doi": _dsig.pe_doi, "ce_oi": _dsig.ce_oi, "pe_oi": _dsig.pe_oi,
+                    "pcr": _dsig.pcr, "atm_iv": _dsig.atm_iv, "vwap": _dsig.vwap,
+                    "session": _dsig.session, "reasons": _dsig.reasons,
+                    "timestamp": str(_dsig.timestamp),
+                }
+                with open("/tmp/nifty_dom_signal.json", "w") as _f:
+                    json.dump(_dom, _f)
+                _ac = {"BUY_CE": "🟢", "BUY_PE": "🔴"}.get(_dsig.action, "⏳")
+                st.success(f"{_ac} {_dsig.action} [{_dsig.strength}] — {_dsig.score}/{_dsig.max_score} | "
+                           f"Imb: {_dsig.book_imbalance:+.2f} | Spot: {_dsig.spot:.0f}")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"DOM scan error: {_e}")
+
+    st.divider()
+
+    if not _dom:
+        st.info("No DOM signal yet. Run `python3 nifty/dom_engine.py` or click **Scan DOM Now**.")
+        st.markdown("""
+**Requires:** `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` in `.env`
+
+Dhan provides free 20-level real order book depth with:
+- Quantity (lots) at every bid/ask level
+- Number of orders at each level (spoof detection)
+- Full option chain with OI change, IV, greeks per strike
+""")
+    else:
+        _d_action  = _dom.get("action", "WAIT")
+        _d_score   = _dom.get("score", 0)
+        _d_max     = _dom.get("max_score", 20)
+        _d_str     = _dom.get("strength", "WAIT")
+        _d_spot    = _dom.get("spot", 0)
+        _d_imb     = _dom.get("book_imbalance", 0.0)
+        _d_oimb    = _dom.get("order_imbalance", 0.0)
+        _d_bid5    = _dom.get("bid_qty_5", 0)
+        _d_ask5    = _dom.get("ask_qty_5", 0)
+        _d_spread  = _dom.get("spread", 0.0)
+        _d_session = _dom.get("session", "")
+        _d_ts      = str(_dom.get("timestamp", ""))[:16]
+        _d_color   = {"BUY_CE": "#00d4aa", "BUY_PE": "#ff4b4b"}.get(_d_action, "#ffa500")
+        _d_ceDOI   = _dom.get("ce_doi", 0)
+        _d_peDOI   = _dom.get("pe_doi", 0)
+        _bwp = _dom.get("bid_wall_price", 0)
+        _bwq = _dom.get("bid_wall_qty", 0)
+        _awp = _dom.get("ask_wall_price", 0)
+        _awq = _dom.get("ask_wall_qty", 0)
+
+        # ── Top metrics ───────────────────────────────────────────────────
+        _dm1, _dm2, _dm3, _dm4, _dm5, _dm6 = st.columns(6)
+        _dm1.metric("Signal", _d_action, delta=_d_str if _d_str != "WAIT" else None)
+        _dm2.metric("Score", f"{_d_score}/{_d_max}")
+        _dm3.metric("Spot", f"{_d_spot:.0f}")
+        _dm4.metric("Book Imb", f"{_d_imb:+.3f}",
+                    delta="Bid heavy" if _d_imb > 0.1 else ("Ask heavy" if _d_imb < -0.1 else "Balanced"))
+        _dm5.metric("Spread", f"{_d_spread:.1f} pt")
+        _dm6.metric("Session", _d_session)
+
+        st.divider()
+        _dl, _dr = st.columns(2)
+
+        # ── Left: imbalance gauge + bid/ask bars ──────────────────────────
+        with _dl:
+            st.markdown("#### 📖 Order Book Pressure")
+            _fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=_d_imb,
+                number={"valueformat": "+.3f", "font": {"size": 28}},
+                gauge={
+                    "axis": {"range": [-1, 1],
+                             "tickvals": [-1, -0.5, 0, 0.5, 1],
+                             "ticktext": ["All Ask", "-0.5", "Neutral", "+0.5", "All Bid"]},
+                    "bar": {"color": _d_color, "thickness": 0.3},
+                    "steps": [
+                        {"range": [-1, -0.3],  "color": "#3d1515"},
+                        {"range": [-0.3, -0.05],"color": "#2d1a1a"},
+                        {"range": [-0.05, 0.05],"color": "#1e2130"},
+                        {"range": [0.05, 0.3],  "color": "#1a2d1a"},
+                        {"range": [0.3, 1],     "color": "#153d15"},
+                    ],
+                },
+                title={"text": "Qty Imbalance (top-5 levels)"},
+            ))
+            _fig_gauge.update_layout(height=260, margin=dict(t=40, b=10, l=20, r=20),
+                                     paper_bgcolor="#0e1117", font_color="white")
+            st.plotly_chart(_fig_gauge, use_container_width=True)
+
+            _fig_ba = go.Figure()
+            _fig_ba.add_bar(x=["Bid (5-level)", "Ask (5-level)"],
+                            y=[_d_bid5, _d_ask5],
+                            marker_color=["#00d4aa", "#ff4b4b"],
+                            text=[f"{_d_bid5:,} lots", f"{_d_ask5:,} lots"],
+                            textposition="outside")
+            _fig_ba.update_layout(title="Lots at Top-5 Levels", height=220,
+                                   paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                                   font_color="white", margin=dict(t=35,b=10,l=10,r=10),
+                                   showlegend=False)
+            st.plotly_chart(_fig_ba, use_container_width=True)
+
+            _oi_c = "#00d4aa" if _d_oimb > 0 else "#ff4b4b"
+            _agree = (_d_oimb > 0) == (_d_imb > 0) and abs(_d_oimb) > 0.05
+            st.markdown(f"""
+<div style='background:#1e2130;border-radius:8px;padding:0.8rem;'>
+<b>Order Count Imbalance (spoof filter)</b><br>
+<span style='font-size:1.5rem;color:{_oi_c};'>{_d_oimb:+.3f}</span>
+<span style='color:#888;font-size:0.85rem;margin-left:1rem;'>
+{"✅ Qty & order count agree — real demand" if _agree
+ else "⚠️ Possible spoof — qty/order mismatch" if abs(_d_imb) > 0.1
+ else "Balanced"}
+</span></div>""", unsafe_allow_html=True)
+
+        # ── Right: OI flow + walls + signal card ──────────────────────────
+        with _dr:
+            st.markdown("#### 📈 OI Flow + Order Walls")
+
+            _fig_oi = go.Figure()
+            _fig_oi.add_bar(
+                x=["CE OI Change", "PE OI Change"],
+                y=[_d_ceDOI, _d_peDOI],
+                marker_color=["#ff4b4b" if _d_ceDOI > 0 else "#00d4aa",
+                              "#00d4aa" if _d_peDOI > 0 else "#ff4b4b"],
+                text=[f"{_d_ceDOI:+,}", f"{_d_peDOI:+,}"],
+                textposition="outside",
+            )
+            _fig_oi.update_layout(title="ATM OI Change (CE DOI vs PE DOI)", height=220,
+                                   paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                                   font_color="white", margin=dict(t=35,b=10,l=10,r=10),
+                                   showlegend=False)
+            st.plotly_chart(_fig_oi, use_container_width=True)
+
+            st.markdown("**Order Walls (≥500 lots resting)**")
+            _wc1, _wc2 = st.columns(2)
+            with _wc1:
+                if _bwq >= 500:
+                    st.markdown(f"<div style='background:#153d15;border-radius:8px;padding:0.8rem;"
+                                f"text-align:center;'>🧱 <b>BID WALL</b><br>"
+                                f"<span style='font-size:1.4rem;color:#00d4aa;'>{_bwq:,} lots</span><br>"
+                                f"<span style='color:#888;'>@ {_bwp:.0f}</span></div>",
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown("<div style='background:#1e2130;border-radius:8px;padding:0.8rem;"
+                                "text-align:center;color:#555;'>No bid wall</div>",
+                                unsafe_allow_html=True)
+            with _wc2:
+                if _awq >= 500:
+                    st.markdown(f"<div style='background:#3d1515;border-radius:8px;padding:0.8rem;"
+                                f"text-align:center;'>🧱 <b>ASK WALL</b><br>"
+                                f"<span style='font-size:1.4rem;color:#ff4b4b;'>{_awq:,} lots</span><br>"
+                                f"<span style='color:#888;'>@ {_awp:.0f}</span></div>",
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown("<div style='background:#1e2130;border-radius:8px;padding:0.8rem;"
+                                "text-align:center;color:#555;'>No ask wall</div>",
+                                unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if _d_action != "WAIT":
+                _ent_ce = _dom.get("entry_ce", 0)
+                _ent_pe = _dom.get("entry_pe", 0)
+                _entry_line = (f"CE Entry: <b>~{_ent_ce:.0f}</b>" if _d_action == "BUY_CE"
+                               else f"PE Entry: <b>~{_ent_pe:.0f}</b>")
+                st.markdown(f"""
+<div style='background:{_d_color}22;border:1px solid {_d_color};border-radius:10px;padding:1rem;'>
+<div style='color:{_d_color};font-size:1.3rem;font-weight:700;'>
+{"🟢 BUY CE" if _d_action == "BUY_CE" else "🔴 BUY PE"} [{_d_str}]
+</div>
+<div style='margin-top:0.5rem;font-size:0.95rem;'>
+ATM: <b>{_dom.get("atm_strike","")}</b> [{_dom.get("expiry","")}]<br>
+{_entry_line}<br>
+SL Spot: <b>{_dom.get("sl_spot",0):.0f}</b> ({_dom.get("sl_pts",0):.0f} pts)
+&nbsp;|&nbsp; Target: <b>{_dom.get("target_spot",0):.0f}</b> R:R 1:{_dom.get("rr",0)}<br>
+PCR: {_dom.get("pcr",0):.2f} | IV: {_dom.get("atm_iv",0):.1f}% | VWAP: {_dom.get("vwap",0):.0f}
+</div></div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+<div style='background:#1e2130;border:1px solid #333;border-radius:10px;padding:1rem;
+color:#ffa500;font-size:1.1rem;font-weight:600;'>
+⏳ WAIT — Score {_d_score}/{_d_max} (need 10+)
+</div>""", unsafe_allow_html=True)
+
+        st.divider()
+
+        _reasons = _dom.get("reasons", [])
+        if _reasons:
+            st.markdown("#### 💡 Signal Reasons")
+            _rcols = st.columns(min(len(_reasons), 3))
+            for _ri, _rt in enumerate(_reasons):
+                _rcols[_ri % 3].markdown(f"• {_rt}")
+
+        st.divider()
+
+        # ── Score breakdown bar chart ─────────────────────────────────────
+        st.markdown("#### 📊 Score Breakdown (estimated per factor)")
+        _factors = ["Book Qty\nImbalance", "Order Count\n(anti-spoof)", "Order\nWalls",
+                    "OI Flow", "Spread", "Session", "VWAP"]
+        _f_max   = [4, 2, 3, 3, 2, 3, 3]
+        _f_scores = [
+            round(min(4, abs(_d_imb) / 0.30 * 4), 1),
+            round(min(2, abs(_d_oimb) / 0.10 * 2) if (_d_oimb > 0) == (_d_imb > 0) else 0, 1),
+            float(min(3, (3 if _bwq >= 500 else 0) + (3 if _awq >= 500 else 0))),
+            round(min(3, abs(_d_ceDOI - _d_peDOI) / max(abs(_d_ceDOI) + abs(_d_peDOI) + 1, 1) * 3), 1),
+            2.0 if _d_spread > 0 and _d_spread <= 1.5 else (1.0 if _d_spread <= 3.0 else 0.0),
+            float({"POWER_HOUR": 3, "CLOSING": 2, "MID_SESSION": 1}.get(_d_session, 0)),
+            3.0 if _dom.get("vwap", 0) and _d_spot and abs(_d_spot - _dom.get("vwap", _d_spot)) / (_dom.get("vwap", _d_spot) or 1) > 0.001 else 0.0,
+        ]
+        _fig_sb = go.Figure()
+        _fig_sb.add_bar(x=_factors, y=_f_scores,
+                        marker_color=[_d_color] * len(_factors),
+                        text=[f"{v:.1f}/{m}" for v, m in zip(_f_scores, _f_max)],
+                        textposition="outside")
+        _fig_sb.update_layout(height=280, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                               font_color="white", margin=dict(t=20, b=10, l=10, r=10),
+                               yaxis=dict(range=[0, 5]))
+        st.plotly_chart(_fig_sb, use_container_width=True)
+
+        st.caption(f"Last update: {_d_ts} IST · Source: Dhan 20-level depth · "
+                   f"Engine: `python3 nifty/dom_engine.py`")
+
+        with st.expander("ℹ️ How DOM Order Flow Works"):
+            st.markdown("""
+### What is DOM (Depth of Market)?
+
+The order book shows all **resting limit orders** at every price before trades happen.
+Dhan gives **20 price levels** on both sides with qty + number of orders per level.
+
+| Signal | What it means |
+|--------|--------------|
+| **Imb +0.30** | 3× more lots on bid — buyers waiting |
+| **Order count mismatch** | 1 order × 10,000 lots = spoof; 200 orders × 50 lots = real |
+| **Bid wall 2,000 lots @ 24450** | Institution has resting buy — strong support |
+| **PE OI +50k, CE OI -20k** | Put writers adding, call writers closing = bullish |
+
+### Spoof filter
+We compare **qty imbalance** vs **order count imbalance**.
+If they agree → real signal. If they disagree → likely spoofing, score reduced.
+""")
+
 
